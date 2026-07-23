@@ -11,12 +11,12 @@
 // ============================================================
 
 export const firebaseConfig = {
-  apiKey: "PASTE_API_KEY",
-  authDomain: "PASTE_PROJECT_ID.firebaseapp.com",
-  projectId: "PASTE_PROJECT_ID",
-  storageBucket: "PASTE_PROJECT_ID.appspot.com",
-  messagingSenderId: "PASTE_SENDER_ID",
-  appId: "PASTE_APP_ID"
+  apiKey: "AIzaSyB1rxsHgXlMZOAHRAfYPGZ4X_ZRIvGKXcg",
+  authDomain: "chip-draw.firebaseapp.com",
+  projectId: "chip-draw",
+  storageBucket: "chip-draw.firebasestorage.app",
+  messagingSenderId: "342409380978",
+  appId: "1:342409380978:web:9c098b27232717711faeeb"
 };
 
 // Google accounts allowed to use the Admin tab (lowercase).
