@@ -310,6 +310,7 @@ $("#adminBtn").addEventListener("click", async () => {
 // ---------- render ----------
 function renderAll(){
   if (!allReady()) return;
+  S.me = S.playerKey ? (S.players[S.playerKey] || null) : null;
   maybeShow();
   if (!S.me) return;
   $("#brandSeason").textContent = (S.game?.title || "CHIP DRAW").toUpperCase();
