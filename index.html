@@ -22,7 +22,7 @@
 
 <!-- Join -->
 <div id="screen-join" class="screen center hidden">
-  <img id="welcomeLogo" src="logo-dark.png" alt="4th and Cold">
+  <img id="welcomeLogo" src="logo-dark.png" alt="4th and Cold" onerror="this.style.display='none'">
   <h1 class="displayHead">Pull Your<br>Chips</h1>
   <p class="muted" style="margin:10px 0 20px;max-width:300px">Draw a chip, pay what it says. Every chip is one shot at a prize.</p>
   <form id="join-form" class="card" autocomplete="on">
@@ -37,7 +37,7 @@
 <!-- Main app -->
 <div id="app" class="hidden">
   <header id="topBar">
-    <img id="topLogo" src="logo-white.png" alt="4th and Cold">
+    <img id="topLogo" src="logo-white.png" alt="4th and Cold" onerror="this.style.display='none'">
     <div id="brand">
       <span id="brandKick">4TH &amp; COLD</span>
       <span id="brandSeason">CHIP DRAW</span>
@@ -97,6 +97,22 @@
       <button class="btn ghost" id="confirm-no">Cancel</button>
       <button class="btn danger" id="confirm-yes">Confirm</button>
     </div>
+  </div>
+</div>
+
+<!-- Live draw wheel -->
+<div id="modal-wheel" class="modal hidden">
+  <div class="modal-body center">
+    <p class="eyebrow" id="wheel-live"><span class="livedot"></span> LIVE DRAW</p>
+    <h3 id="wheel-prize" style="margin-top:4px"></h3>
+    <div id="wheel-wrap">
+      <div id="wheel-pointer">&#9660;</div>
+      <canvas id="wheel" width="320" height="320"></canvas>
+    </div>
+    <p id="wheel-status" class="small muted"></p>
+    <div id="wheel-winner" class="hidden"></div>
+    <p class="small muted" style="margin-top:8px">Every chip is one equal slice. The winner is picked with the browser's cryptographic random generator and logged to the audit trail.</p>
+    <button class="btn ghost" id="wheel-close" style="margin-top:8px">Close</button>
   </div>
 </div>
 

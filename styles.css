@@ -219,3 +219,16 @@ td input{padding:6px 8px;max-width:80px}
 #welcomeLogo{height:96px;width:auto;display:block;margin-bottom:10px}
 @media (max-width:420px){#welcomeLogo{height:78px}.displayHead{font-size:38px}}
 .divider{height:1px;background:var(--line);margin:18px 0}
+
+/* ---------- live draw wheel ---------- */
+#modal-wheel .modal-body{border-radius:14px;margin:0 16px 8vh}
+#wheel-wrap{position:relative;margin:8px auto 4px;width:320px;max-width:82vw}
+#wheel{width:100%;height:auto;display:block}
+#wheel-pointer{position:absolute;top:-14px;left:50%;transform:translateX(-50%);
+  font-size:26px;color:var(--orange);z-index:2;text-shadow:0 2px 3px rgba(32,26,22,.3)}
+#wheel-winner{font-family:var(--disp);font-weight:800;font-size:30px;
+  text-transform:uppercase;color:var(--orange-deep);margin-top:6px}
+.livedot{display:inline-block;width:9px;height:9px;border-radius:50%;
+  background:var(--red);margin-right:4px;animation:livepulse 1.2s infinite}
+@keyframes livepulse{0%,100%{opacity:1}50%{opacity:.3}}
+@media (prefers-reduced-motion:reduce){.livedot{animation:none}}

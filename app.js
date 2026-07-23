@@ -8,14 +8,20 @@ import {
   getRedirectResult, signOut
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
 import {
-  getFirestore, doc, collection, onSnapshot, setDoc, updateDoc,
-  addDoc, runTransaction, writeBatch, serverTimestamp, arrayUnion
+  getFirestore, doc, collection, onSnapshot, setDoc, updateDoc, deleteDoc,
+  addDoc, getDocs, query, orderBy, limit, runTransaction, writeBatch,
+  serverTimestamp, arrayUnion
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
-import { firebaseConfig, ADMIN_EMAILS } from "./firebase-config.js";
+import * as CFG from "./firebase-config.js";
 
-const app  = initializeApp(firebaseConfig);
+const app  = initializeApp(CFG.firebaseConfig);
 const auth = getAuth(app);
 const db   = getFirestore(app);
+
+// Admin tiers — POWER_ADMIN_EMAILS / PAYMENT_ADMIN_EMAILS in firebase-config.js
+// (falls back to the old ADMIN_EMAILS list as power admins)
+const POWER = (CFG.POWER_ADMIN_EMAILS || CFG.ADMIN_EMAILS || []).map(e=>e.toLowerCase());
+const PAY   = (CFG.PAYMENT_ADMIN_EMAILS || []).map(e=>e.toLowerCase());
 
 // Same collectors as the squares board
 const VENMO = [
@@ -26,11 +32,12 @@ const VENMO = [
 
 // ---------- state ----------
 const S = {
-  uid: null, email: null, isAdmin: false,
-  game: null, bag: null, me: null,
+  uid: null, email: null, isPower: false, isPay: false, isAdmin: false,
+  game: null, bag: null, me: null, liveDraw: null,
   players: {}, chips: {}, prizes: {}, alerts: {},
   ready: { game:false, bag:false, chips:false, prizes:false, players:false },
-  view: "chips", adminDirty: false, unsubAlerts: null
+  view: "chips", adminDirty: false, oddsOpen: false,
+  unsubAlerts: null, wheelKey: null, wheelDismissed: null
 };
 
 // ---------- helpers ----------
@@ -67,7 +74,7 @@ function chipHTML(value, size=""){
 let toastT = null;
 function toast(msg){
   const t = $("#toast"); t.textContent = msg; t.classList.remove("hidden");
-  clearTimeout(toastT); toastT = setTimeout(()=>t.classList.add("hidden"), 3200);
+  clearTimeout(toastT); toastT = setTimeout(()=>t.classList.add("hidden"), 3600);
 }
 function confirmDialog(title, html, yesLabel){
   return new Promise(res => {
@@ -105,6 +112,8 @@ const drawnCount   = v   => chipsArr().filter(c=>c.value===v).length;
 const bucketCount  = pid => chipsArr().filter(c=>c.bucket===pid).length;
 const myBucketCount= pid => myChips().filter(c=>c.bucket===pid).length;
 const anyUnpaid = () => Object.keys(S.players).some(u => balanceOf(u) > 0.005);
+const bucketEntries = pid => chipsArr().filter(c => c.bucket === pid)
+  .sort((a,b) => a.id < b.id ? -1 : 1);   // deterministic order on every device
 function bagRemaining(){
   const gs = [...(S.bag?.groups||[])].filter(g=>g.remaining>0).sort((a,b)=>a.value-b.value);
   const total = gs.reduce((s,g)=>s+g.remaining,0);
@@ -117,13 +126,14 @@ function bagInfoHTML(withOdds){
   const range = b.min === b.max ? money(b.min) : `${money(b.min)}–${money(b.max)}`;
   let html = `<b>${b.total}</b> chip${b.total===1?"":"s"} left in the bag · ${range} still out there`;
   if (withOdds){
-    html += `<details class="bagodds"><summary>What are my odds?</summary>` +
+    html += `<details class="bagodds" ${S.oddsOpen?"open":""}><summary>What are my odds?</summary>` +
       b.groups.map(g => `
         <div class="bag-row">
           ${chipHTML(g.value,"mini")}
           <div class="bag-bar"><i style="width:${(g.remaining/b.total*100).toFixed(1)}%"></i></div>
           <div class="bag-nums"><b>${g.remaining}</b> left · ${(g.remaining/b.total*100).toFixed(0)}%</div>
-        </div>`).join("") + `</details>`;
+        </div>`).join("") +
+      `<p class="muted small" style="margin-top:8px">Chips are pulled with the browser's cryptographic random generator (crypto.getRandomValues) — the same class of randomness used for security keys. Every draw is logged.</p></details>`;
   }
   return html;
 }
@@ -134,9 +144,10 @@ onAuthStateChanged(auth, user => {
   if (!user){ signInAnonymously(auth).catch(bootError); return; }
   S.uid = user.uid;
   S.email = (user.email || "").toLowerCase() || null;
-  S.isAdmin = !!S.email && ADMIN_EMAILS.map(e=>e.toLowerCase()).includes(S.email);
-  if (S.email && !S.isAdmin)
-    toast(`${S.email} isn't on the admin list.`);
+  S.isPower = !!S.email && POWER.includes(S.email);
+  S.isPay   = !!S.email && PAY.includes(S.email);
+  S.isAdmin = S.isPower || S.isPay;
+  if (S.email && !S.isAdmin) toast(`${S.email} isn't on the admin list.`);
   startListeners();
 });
 function bootError(e){
@@ -151,9 +162,11 @@ function startListeners(){
   started = true;
   onSnapshot(doc(db,"config","game"), async snap => {
     if (!snap.exists()){
-      if (S.isAdmin){
-        await setDoc(doc(db,"config","game"), { title:"Chip Draw Raffle",
-          state:"setup", unassignedRule:"warn", unpaidCap:0, unpaidAtLock:false });
+      if (S.isPower){
+        try{
+          await setDoc(doc(db,"config","game"), { title:"Chip Draw Raffle",
+            state:"setup", unassignedRule:"warn", unpaidCap:0, unpaidAtLock:false });
+        }catch(e){ toast("Setup failed — check firestore.rules email list: " + (e.code||e.message)); }
         return;
       }
       S.game = null;
@@ -163,6 +176,10 @@ function startListeners(){
   onSnapshot(doc(db,"config","bag"), snap => {
     S.bag = snap.exists() ? snap.data() : { groups: [] };
     S.ready.bag = true; renderAll();
+  });
+  onSnapshot(doc(db,"config","liveDraw"), snap => {
+    S.liveDraw = snap.exists() ? snap.data() : null;
+    handleLiveDraw();
   });
   onSnapshot(collection(db,"chips"), qs => {
     S.chips = {}; qs.forEach(d => S.chips[d.id] = d.data());
@@ -232,7 +249,6 @@ function setView(v){
   renderAll();
 }
 
-// Admin button (top-right, like the squares board)
 $("#adminBtn").addEventListener("click", async () => {
   if (S.view === "admin"){ setView("chips"); return; }
   if (S.isAdmin){ setView("admin"); return; }
@@ -262,7 +278,6 @@ function renderAll(){
   $("#brandSeason").textContent = (S.game?.title || "CHIP DRAW").toUpperCase();
   renderBalancePill(); renderBanners();
   renderChipsTab(); renderPrizesTab();
-  $("#adminBtn").classList.remove("hidden");
   if (S.view === "admin"){
     if (S.isAdmin) renderAdminPanel(); else setView("chips");
   }
@@ -318,10 +333,10 @@ $("#banners").addEventListener("click", async e => {
   const d = e.target.dataset;
   if (d.dismiss){
     const notices = (S.me.notices||[]).filter(n => n.id !== d.dismiss);
-    await updateDoc(doc(db,"players",S.uid), { notices });
+    await updateDoc(doc(db,"players",S.uid), { notices }).catch(x=>toast(x.message));
   }
   if (d.copy){ try{ await navigator.clipboard.writeText(d.copy); toast("Emails copied"); }catch{ toast("Copy failed"); } }
-  if (d.resolve){ await updateDoc(doc(db,"adminAlerts",d.resolve), { resolved:true }); }
+  if (d.resolve){ await updateDoc(doc(db,"adminAlerts",d.resolve), { resolved:true }).catch(x=>toast(x.message)); }
 });
 
 // ---------- MY CHIPS ----------
@@ -375,6 +390,8 @@ function renderChipsTab(){
       <p class="muted small" style="margin-top:10px">Every chip = one entry on whatever prize you place it. The dollar value is what you pay — it doesn't change your odds.</p>
     </div>`;
   $("#btn-draw")?.addEventListener("click", openDraw);
+  el.querySelector(".bagodds")?.addEventListener("toggle",
+    e => { S.oddsOpen = e.target.open; });
   el.querySelectorAll("[data-move]").forEach(b => b.addEventListener("click", () => {
     const [v, bucket] = b.dataset.move.split("|");
     openMoveSheet(Number(v), bucket || null);
@@ -450,7 +467,7 @@ function renderPrizesTab(){
   const unallocated = myChips().filter(c=>!c.bucket).length;
   el.innerHTML = `
     ${state==="open" ? `<p class="muted small" style="margin:10px 0">You have <b>${unallocated}</b> unplaced chip${unallocated===1?"":"s"}. Every chip on a prize is one entry in that drawing — move them around any time until buckets lock.</p>` : ""}
-    ${state==="locked" ? `<div class="banner info"><div class="grow">Buckets are <b>locked</b>. Winners will be drawn soon.</div></div>` : ""}
+    ${state==="locked" ? `<div class="banner info"><div class="grow">Buckets are <b>locked</b>. Watch for live drawings — the wheel pops up right here when one starts.</div></div>` : ""}
     ${ps.map(p => {
       const total = bucketCount(p.id), mine = myBucketCount(p.id);
       const won = !!p.winnerChipId;
@@ -572,6 +589,133 @@ function openMoveSheet(value, fromBucket){
   wireSteppers();
 }
 
+// ============================================================
+// LIVE DRAW WHEEL
+// ============================================================
+let wheelRAF = null;
+const easeOutCubic = t => 1 - Math.pow(1 - t, 3);
+function ownerHue(uid){
+  let h = 0;
+  for (let i = 0; i < uid.length; i++) h = (h * 31 + uid.charCodeAt(i)) >>> 0;
+  return h % 360;
+}
+function handleLiveDraw(){
+  const ld = S.liveDraw;
+  const m = $("#modal-wheel");
+  if (!ld || !ld.startedAtMs || ld.status === "cleared"){
+    m.classList.add("hidden"); stopWheel(); S.wheelKey = null; return;
+  }
+  const key = ld.prizeId + "|" + ld.startedAtMs;
+  if (S.wheelDismissed === key) return;
+  const elapsed = Date.now() - ld.startedAtMs;
+  // stale draw from long ago — don't pop it up
+  if (ld.status === "done" && elapsed > (ld.durationMs||10000) + 120000) return;
+  if (S.wheelKey !== key){
+    S.wheelKey = key;
+    m.classList.remove("hidden");
+    startWheel(ld);
+  }
+  // safety net: finalize if the starting device dropped off
+  if (S.isAdmin && ld.status === "spinning" && elapsed > (ld.durationMs||10000) + 5000)
+    finalizeLive(ld);
+}
+function startWheel(ld){
+  stopWheel();
+  $("#wheel-prize").textContent = ld.prizeName || "";
+  $("#wheel-winner").classList.add("hidden");
+  $("#wheel-winner").textContent = "";
+  const entries = bucketEntries(ld.prizeId);
+  const N = entries.length;
+  const winIdx = entries.findIndex(c => c.id === ld.winnerChipId);
+  const cv = $("#wheel"), ctx = cv.getContext("2d");
+  const D = ld.durationMs || 10000;
+  $("#wheel-status").textContent = `${N} chip${N===1?"":"s"} in — spinning…`;
+  if (!N || winIdx < 0){ showWheelResult(ld); return; }
+  const slice = (Math.PI * 2) / N;
+  // land the winning slice's center under the top pointer (-90°)
+  const target = Math.PI * 2 * 6 + ((Math.PI * 2) - (winIdx + 0.5) * slice) - Math.PI / 2;
+  const draw = angle => {
+    const r = cv.width / 2;
+    ctx.clearRect(0, 0, cv.width, cv.height);
+    ctx.save();
+    ctx.translate(r, r);
+    ctx.rotate(angle);
+    for (let i = 0; i < N; i++){
+      const c = entries[i];
+      ctx.beginPath();
+      ctx.moveTo(0, 0);
+      ctx.arc(0, 0, r - 6, i * slice, (i + 1) * slice);
+      ctx.closePath();
+      ctx.fillStyle = `hsl(${ownerHue(c.owner)},52%,${c.owner===S.uid?46:60}%)`;
+      ctx.fill();
+      if (c.owner === S.uid){
+        ctx.lineWidth = 2; ctx.strokeStyle = "#FFC53D"; ctx.stroke();
+      } else if (N <= 120){
+        ctx.lineWidth = 1; ctx.strokeStyle = "rgba(255,255,255,.45)"; ctx.stroke();
+      }
+    }
+    ctx.restore();
+    // hub
+    ctx.beginPath(); ctx.arc(r, r, 26, 0, Math.PI * 2);
+    ctx.fillStyle = "#201A16"; ctx.fill();
+    ctx.fillStyle = "#FAF6F0";
+    ctx.font = "700 13px 'Barlow Semi Condensed',sans-serif";
+    ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.fillText(String(N), r, r);
+  };
+  const tick = () => {
+    const p = Math.min(1, (Date.now() - ld.startedAtMs) / D);
+    draw(target * easeOutCubic(p));
+    if (p < 1){ wheelRAF = requestAnimationFrame(tick); }
+    else { wheelRAF = null; showWheelResult(ld); }
+  };
+  tick();
+}
+function stopWheel(){ if (wheelRAF){ cancelAnimationFrame(wheelRAF); wheelRAF = null; } }
+function showWheelResult(ld){
+  $("#wheel-status").textContent = "Winning chip:";
+  const w = $("#wheel-winner");
+  w.textContent = "🏆 " + (ld.winnerName || "?");
+  w.classList.remove("hidden");
+}
+$("#wheel-close").addEventListener("click", () => {
+  S.wheelDismissed = S.wheelKey;
+  $("#modal-wheel").classList.add("hidden");
+  stopWheel();
+});
+async function startLiveDraw(pid){
+  const p = S.prizes[pid]; if (!p || p.winnerChipId) return;
+  const entries = bucketEntries(pid);
+  if (!entries.length){ toast("No chips in that bucket."); return; }
+  const win = entries[cryptoRandInt(entries.length)];
+  const D = 10000;
+  await setDoc(doc(db,"config","liveDraw"), {
+    prizeId: pid, prizeName: p.name,
+    winnerChipId: win.id, winnerName: win.ownerName,
+    startedAtMs: Date.now(), durationMs: D, status: "spinning"
+  });
+  audit("live-draw", `${p.name} — wheel started (${entries.length} entries)`);
+  setTimeout(() => finalizeLive({ prizeId: pid, winnerChipId: win.id,
+    winnerName: win.ownerName, winnerEmail: win.ownerEmail, winnerValue: win.value }), D + 600);
+}
+async function finalizeLive(ld){
+  try{
+    const p = S.prizes[ld.prizeId];
+    if (p && !p.winnerChipId){
+      const chip = S.chips[ld.winnerChipId] || {};
+      await updateDoc(doc(db,"prizes",ld.prizeId), {
+        winnerChipId: ld.winnerChipId,
+        winnerName: ld.winnerName || chip.ownerName || "?",
+        winnerEmail: ld.winnerEmail || chip.ownerEmail || "",
+        winnerValue: ld.winnerValue ?? chip.value ?? 0,
+        drawnAt: serverTimestamp()
+      });
+      audit("winner", `${p.name} → ${ld.winnerName || chip.ownerName} (live wheel)`);
+    }
+    await updateDoc(doc(db,"config","liveDraw"), { status: "done" }).catch(()=>{});
+  }catch(e){ toast("Finalize failed: " + (e.code || e.message)); }
+}
+
 // ---------- ADMIN PANEL ----------
 function adminEditing(){
   const a = document.activeElement;
@@ -590,18 +734,66 @@ function renderAdminPanel(force){
   const unallocAll = chipsArr().filter(c=>!c.bucket).length;
   const allDrawn = ps.length && ps.every(p=>p.winnerChipId);
 
+  const drawingSection = `
+    <h2>Drawings</h2>
+    ${state!=="locked" && state!=="complete"
+      ? `<p class="muted small">Lock buckets first — drawings run after the lock.</p>`
+      : ps.map(p=>`<div class="card">
+          <div class="row spread"><b>${esc(p.name)}</b>
+            <span class="muted small num">${bucketCount(p.id)} chips</span></div>
+          ${p.winnerChipId
+            ? `<p class="small" style="color:var(--orange-deep);font-weight:700;margin-top:6px">🏆 ${esc(p.winnerName||S.chips[p.winnerChipId]?.ownerName||"?")}</p>`
+            : `<div class="row gap">
+                <button class="btn mini gold" data-livedraw="${p.id}">🎡 Live wheel draw</button>
+                <button class="btn mini" data-drawwin="${p.id}">Quick draw (no wheel)</button>
+              </div>`}
+        </div>`).join("")}
+    <p class="muted small" style="margin:4px 0 8px">Live wheel: everyone with the site open sees the same 10-second spin on their phone, then the winner. Quick draw records instantly with no show.</p>`;
+
+  const paymentsSection = `
+    <h2>Payments</h2>
+    <div class="card" style="overflow-x:auto">
+      <table><thead><tr><th>Player</th><th>Chips</th><th>Owed</th><th>Paid</th><th>Bal</th><th></th></tr></thead>
+      <tbody>${Object.entries(S.players).map(([u,pl])=>{
+        const o = owedBy(u), bal = o - (pl.paid||0);
+        return `<tr>
+          <td>${esc(pl.name)}<br><span class="muted small">${esc(pl.email)}</span></td>
+          <td class="num">${chipsArr().filter(c=>c.owner===u).length}</td>
+          <td class="num">${money(o)}</td>
+          <td><input type="number" step="0.01" min="0" class="pay-in num" data-u="${u}" value="${pl.paid||0}"></td>
+          <td class="num ${bal>0.005?"owefig":"okfig"}">${money(bal)}</td>
+          <td><button class="btn mini" data-paidfull="${u}">Paid ✓</button></td>
+        </tr>`;}).join("")}</tbody></table>
+      <button class="btn mini" style="margin-top:10px" data-act="savepays">Save payment edits</button>
+      <button class="btn mini" data-act="csv">Download CSV</button>
+    </div>`;
+
+  const footer = `
+    <p class="muted small" style="margin:8px 0 4px">Signed in as ${esc(S.email)}
+      (${S.isPower ? "power admin" : "payment admin"}) ·
+      <button class="btn mini ghost" data-act="signout">Sign out</button></p>
+    <p class="muted small" style="margin:0 0 30px">If you're playing too, draw your chips while signed in with Google so they stay tied to this account.</p>`;
+
+  if (!S.isPower){
+    // payment admins: drawings + payments only
+    el.innerHTML = `<h2>Game state: <span style="color:var(--orange)">${state.toUpperCase()}</span></h2>`
+      + drawingSection + paymentsSection + footer;
+    wireAdmin(el);
+    return;
+  }
+
   el.innerHTML = `
     <h2>Game state: <span style="color:var(--orange)">${state.toUpperCase()}</span></h2>
     <div class="card">
-      ${state==="setup" ? `<button class="btn primary block" data-act="open">Open the game</button>
-        <p class="muted small" style="margin-top:8px">Players can join now, but can't draw until you open.</p>` : ""}
-      ${state==="open" ? `<button class="btn primary block" data-act="lock">Lock buckets</button>
+      <p class="muted small" style="margin-bottom:10px">Flow: <b>SETUP</b> (build bag + prizes) → <b>OPEN</b> (drawing &amp; placing) → <b>LOCKED</b> (run drawings) → <b>COMPLETE</b>. Buttons below move to the <i>next</i> step.</p>
+      ${state==="setup" ? `<button class="btn primary block" data-act="open">▶ Open the game (start drawing)</button>` : ""}
+      ${state==="open" ? `<button class="btn primary block" data-act="lock">🔒 Lock buckets (end placing)</button>
         <p class="muted small" style="margin-top:8px">${unallocAll} unplaced chip${unallocAll===1?"":"s"} across all players.
         Rule on lock: <b>${g.unassignedRule==="warn" ? "warn me (blocks lock)" : "auto-move to " + esc(S.prizes[g.unassignedRule]?.name || "?")}</b></p>` : ""}
       ${state==="locked" ? `
-        <button class="btn block" data-act="reopen">Reopen (unlock)</button>
-        ${allDrawn ? `<button class="btn gold block" style="margin-top:8px" data-act="complete">Mark game complete</button>` : ""}` : ""}
-      ${state==="complete" ? `<p class="muted">Game complete. 🏁</p>` : ""}
+        <button class="btn block" data-act="reopen">↩ Reopen (undo lock)</button>
+        ${allDrawn ? `<button class="btn gold block" style="margin-top:8px" data-act="complete">🏁 Mark game complete</button>` : ""}` : ""}
+      ${state==="complete" ? `<p class="muted">Game complete. 🏁 Archive it below, then clear for the next run.</p>` : ""}
     </div>
 
     <h2>Settings</h2>
@@ -614,6 +806,7 @@ function renderAdminPanel(force){
           <option value="warn" ${g.unassignedRule==="warn"?"selected":""}>Warn me and block the lock</option>
           ${ps.map(p=>`<option value="${p.id}" ${g.unassignedRule===p.id?"selected":""}>Auto-move to: ${esc(p.name)}</option>`).join("")}
         </select></label>
+      <p class="muted small" style="margin-top:-6px;margin-bottom:10px">This decides what happens to chips nobody placed when you hit Lock: either the lock is blocked so you can chase people down, or the chips auto-move into the prize you pick here. Add prizes and they'll show up as options.</p>
       <button class="btn block" data-act="savesettings">Save settings</button>
     </div>
 
@@ -639,11 +832,9 @@ function renderAdminPanel(force){
     ${ps.map(p=>`<div class="card">
       <div class="row spread"><b>${esc(p.name)}</b>
         <span class="muted small num">${bucketCount(p.id)} chips</span></div>
-      ${p.winnerChipId ? `<p class="winline small" style="color:var(--orange-deep);font-weight:700;margin-top:6px">🏆 ${esc(S.chips[p.winnerChipId]?.ownerName||"?")} — $${S.chips[p.winnerChipId]?.value??"?"} chip</p>`
-        : (state==="locked" ? `<button class="btn mini gold" style="margin-top:8px" data-drawwin="${p.id}">Draw winner</button>` : "")}
+      ${p.winnerChipId ? `<p class="small" style="color:var(--orange-deep);font-weight:700;margin-top:6px">🏆 ${esc(p.winnerName||"?")}</p>` : ""}
       ${state!=="complete" && !p.winnerChipId ? `<button class="btn mini danger" style="margin-top:8px" data-delprize="${p.id}">Remove prize</button>` : ""}
     </div>`).join("")}
-    ${state==="locked" && ps.some(p=>!p.winnerChipId) ? `<button class="btn gold block" data-act="drawall">Draw all remaining winners</button>` : ""}
     ${ps.length < 30 ? `
     <div class="card">
       <h3>Add a prize</h3>
@@ -653,40 +844,55 @@ function renderAdminPanel(force){
       <button class="btn block" data-act="addprize">Add prize</button>
     </div>` : ""}
 
-    <h2>Payments</h2>
-    <div class="card" style="overflow-x:auto">
-      <table><thead><tr><th>Player</th><th>Chips</th><th>Owed</th><th>Paid</th><th>Bal</th><th></th></tr></thead>
-      <tbody>${Object.entries(S.players).map(([u,pl])=>{
-        const o = owedBy(u), bal = o - (pl.paid||0);
-        return `<tr>
-          <td>${esc(pl.name)}<br><span class="muted small">${esc(pl.email)}</span></td>
-          <td class="num">${chipsArr().filter(c=>c.owner===u).length}</td>
-          <td class="num">${money(o)}</td>
-          <td><input type="number" step="0.01" min="0" class="pay-in num" data-u="${u}" value="${pl.paid||0}"></td>
-          <td class="num ${bal>0.005?"owefig":"okfig"}">${money(bal)}</td>
-          <td><button class="btn mini" data-paidfull="${u}">Paid ✓</button></td>
-        </tr>`;}).join("")}</tbody></table>
-      <button class="btn mini" style="margin-top:10px" data-act="savepays">Save payment edits</button>
-      <button class="btn mini" data-act="csv">Download CSV</button>
-    </div>
-    <p class="muted small" style="margin:8px 0 4px">Signed in as ${esc(S.email)} ·
-      <button class="btn mini ghost" data-act="signout">Sign out</button></p>
-    <p class="muted small" style="margin:0 0 30px">If you're playing too, draw your chips while signed in with Google so they stay tied to this account.</p>
-  `;
+    ${drawingSection}
+    ${paymentsSection}
 
+    <h2>History &amp; archives</h2>
+    <div class="card">
+      <button class="btn mini" data-act="loadaudit">Load audit trail</button>
+      <div id="audit-out" style="margin-top:10px"></div>
+    </div>
+    <div class="card">
+      <p class="muted small" style="margin-bottom:10px">Backups save everything — game, bag, players, chips, prizes — as JSON (full restore) + CSV (readable). Cloud archives are stored in Firestore with prize photos stripped to fit.</p>
+      <div class="row gap" style="flex-wrap:wrap;margin-top:0">
+        <button class="btn mini" data-act="backup">⬇ Download backup (JSON + CSV)</button>
+        <button class="btn mini" data-act="cloudarchive">☁ Save archive to cloud</button>
+        <button class="btn mini" data-act="listarchives">List cloud archives</button>
+      </div>
+      <div id="archive-out" style="margin-top:10px"></div>
+      <div class="divider"></div>
+      <label>Restore from a backup JSON file
+        <input id="restore-file" type="file" accept=".json,application/json"></label>
+      <button class="btn mini" data-act="restore">Restore from file</button>
+      <div class="divider"></div>
+      <button class="btn danger block" data-act="cleargame">🧹 Clear game for a new run (auto-archives first)</button>
+    </div>
+    ${footer}
+  `;
+  wireAdmin(el);
+}
+function wireAdmin(el){
   el.querySelectorAll("input,select,textarea").forEach(i =>
     i.addEventListener("input", () => { S.adminDirty = true; }));
   el.querySelectorAll("[data-act]").forEach(b => b.addEventListener("click", async () => {
-    await adminAct(b.dataset.act);
+    try{ await adminAct(b.dataset.act); }
+    catch(e){ toast((e.code === "permission-denied"
+      ? "Permission denied — is your email in the firestore.rules list? "
+      : "") + (e.code || e.message)); }
     S.adminDirty = false; renderAdminPanel(true);
   }));
   el.querySelectorAll("[data-delprize]").forEach(b => b.addEventListener("click", () => removePrize(b.dataset.delprize)));
-  el.querySelectorAll("[data-drawwin]").forEach(b => b.addEventListener("click", () => drawWinner(b.dataset.drawwin)));
+  el.querySelectorAll("[data-drawwin]").forEach(b => b.addEventListener("click",
+    () => drawWinner(b.dataset.drawwin).catch(e=>toast(e.code||e.message))));
+  el.querySelectorAll("[data-livedraw]").forEach(b => b.addEventListener("click",
+    () => startLiveDraw(b.dataset.livedraw).catch(e=>toast(e.code||e.message))));
   el.querySelectorAll("[data-paidfull]").forEach(b => b.addEventListener("click", async () => {
     const u = b.dataset.paidfull;
-    await updateDoc(doc(db,"players",u), { paid: owedBy(u) });
-    audit("payment", `${S.players[u].name} marked paid in full (${money(owedBy(u))})`);
-    toast("Marked paid");
+    try{
+      await updateDoc(doc(db,"players",u), { paid: owedBy(u) });
+      audit("payment", `${S.players[u].name} marked paid in full (${money(owedBy(u))})`);
+      toast("Marked paid");
+    }catch(e){ toast(e.code || e.message); }
   }));
   $("#bb-add")?.addEventListener("click", () => {
     S.adminDirty = true;
@@ -699,6 +905,7 @@ function renderAdminPanel(force){
       <span class="muted small num">0 drawn</span>
       <button class="btn mini danger bb-del">✕</button>`;
     holder.insertBefore(row, $("#bb-add"));
+    row.querySelector("input").addEventListener("input", () => { S.adminDirty = true; });
     row.querySelector(".bb-del").addEventListener("click", () => row.remove());
   });
   el.querySelectorAll(".bb-del:not([disabled])").forEach(b =>
@@ -736,7 +943,8 @@ async function adminAct(act){
   }
   if (act === "open"){
     if (!(S.bag?.groups||[]).length){ toast("Fill the bag first."); return; }
-    await updateDoc(gRef, { state:"open" }); audit("state","open");
+    await updateDoc(gRef, { state:"open" });
+    toast("Game is OPEN — players can draw"); audit("state","open");
   }
   if (act === "lock") await lockGame();
   if (act === "reopen"){
@@ -745,10 +953,6 @@ async function adminAct(act){
   }
   if (act === "complete"){ await updateDoc(gRef, { state:"complete" }); audit("state","complete"); }
   if (act === "addprize") await addPrize();
-  if (act === "drawall"){
-    for (const p of prizesArr().filter(p=>!p.winnerChipId)) await drawWinner(p.id, true);
-    toast("All winners drawn");
-  }
   if (act === "savepays"){
     const batch = writeBatch(db);
     $$(".pay-in").forEach(inp => {
@@ -760,6 +964,12 @@ async function adminAct(act){
   }
   if (act === "csv") downloadCSV();
   if (act === "signout"){ await signOut(auth); location.reload(); }
+  if (act === "loadaudit") await loadAudit();
+  if (act === "backup") downloadBackup();
+  if (act === "cloudarchive") await cloudArchive();
+  if (act === "listarchives") await listArchives();
+  if (act === "restore") await restoreFromFile();
+  if (act === "cleargame") await clearGame();
 }
 
 async function lockGame(){
@@ -807,14 +1017,12 @@ async function addPrize(){
   const name = $("#np-name").value.trim();
   if (!name){ toast("Prize needs a name."); return; }
   if (prizesArr().length >= 30){ toast("Max 30 prizes."); return; }
-  try{
-    const img = await readImage($("#np-img").files[0]);
-    await addDoc(collection(db,"prizes"), {
-      name, desc: $("#np-desc").value.trim(), img,
-      order: Date.now(), winnerChipId: null, createdAt: serverTimestamp()
-    });
-    audit("prize", `added: ${name}`); toast("Prize added");
-  }catch(e){ toast(e.message); }
+  const img = await readImage($("#np-img").files[0]);
+  await addDoc(collection(db,"prizes"), {
+    name, desc: $("#np-desc").value.trim(), img,
+    order: Date.now(), winnerChipId: null, createdAt: serverTimestamp()
+  });
+  audit("prize", `added: ${name}`); toast("Prize added");
 }
 async function removePrize(pid){
   const p = S.prizes[pid]; if (!p) return;
@@ -827,37 +1035,78 @@ async function removePrize(pid){
   const ok = await confirmDialog(`Remove "${p.name}"?`,
     `<p class="small">${affected.length} chip${affected.length===1?"":"s"} in this bucket will go back to their owners as unplaced. Owners get a notice at next login, and you'll get their emails to follow up.</p>`);
   if (!ok) return;
-  const batch = writeBatch(db);
-  affected.forEach(c => batch.update(doc(db,"chips",c.id), { bucket:null, movedAt: serverTimestamp() }));
-  Object.entries(byOwner).forEach(([uid, info]) => {
-    batch.update(doc(db,"players",uid), { notices: arrayUnion({
-      id: "pr-" + pid + "-" + Date.now(),
-      msg: `The prize "${p.name}" was removed. ${info.chips} of your chip${info.chips>1?"s":""} went back to your unplaced stack — put them on another prize.`,
-      at: Date.now()
-    })});
-  });
-  batch.delete(doc(db,"prizes",pid));
-  await batch.commit();
-  if (affected.length){
-    await addDoc(collection(db,"adminAlerts"), {
-      type:"prizeRemoved", prizeName: p.name,
-      impacted: Object.values(byOwner), at: serverTimestamp(), resolved:false
+  try{
+    const batch = writeBatch(db);
+    affected.forEach(c => batch.update(doc(db,"chips",c.id), { bucket:null, movedAt: serverTimestamp() }));
+    Object.entries(byOwner).forEach(([uid, info]) => {
+      batch.update(doc(db,"players",uid), { notices: arrayUnion({
+        id: "pr-" + pid + "-" + Date.now(),
+        msg: `The prize "${p.name}" was removed. ${info.chips} of your chip${info.chips>1?"s":""} went back to your unplaced stack — put them on another prize.`,
+        at: Date.now()
+      })});
     });
-  }
-  audit("prize", `removed: ${p.name} (${affected.length} chips returned)`);
-  toast("Prize removed");
+    batch.delete(doc(db,"prizes",pid));
+    await batch.commit();
+    if (affected.length){
+      await addDoc(collection(db,"adminAlerts"), {
+        type:"prizeRemoved", prizeName: p.name,
+        impacted: Object.values(byOwner), at: serverTimestamp(), resolved:false
+      });
+    }
+    audit("prize", `removed: ${p.name} (${affected.length} chips returned)`);
+    toast("Prize removed");
+  }catch(e){ toast(e.code || e.message); }
 }
 async function drawWinner(pid, quiet){
   const p = S.prizes[pid]; if (!p || p.winnerChipId) return;
-  const entries = chipsArr().filter(c => c.bucket === pid);
+  const entries = bucketEntries(pid);
   if (!entries.length){ if(!quiet) toast("No chips in that bucket."); return; }
   const win = entries[cryptoRandInt(entries.length)];
   await updateDoc(doc(db,"prizes",pid), {
     winnerChipId: win.id, winnerName: win.ownerName,
     winnerEmail: win.ownerEmail, winnerValue: win.value, drawnAt: serverTimestamp()
   });
-  audit("winner", `${p.name} → ${win.ownerName} ($${win.value} chip, ${entries.length} entries)`);
+  audit("winner", `${p.name} → ${win.ownerName} ($${win.value} chip, ${entries.length} entries, quick draw)`);
   if (!quiet) toast(`🏆 ${win.ownerName} wins ${p.name}!`);
+}
+
+// ---------- audit viewer ----------
+async function loadAudit(){
+  const out = $("#audit-out");
+  out.innerHTML = `<p class="muted small">Loading…</p>`;
+  const qs = await getDocs(query(collection(db,"audit"), orderBy("at","desc"), limit(100)));
+  const rows = [];
+  qs.forEach(d => {
+    const a = d.data();
+    const when = a.at?.toDate ? a.at.toDate().toLocaleString() : "";
+    rows.push(`<tr><td class="small muted" style="white-space:nowrap">${esc(when)}</td>
+      <td class="small">${esc(a.who)}</td><td class="small"><b>${esc(a.action)}</b> ${esc(a.detail)}</td></tr>`);
+  });
+  out.innerHTML = rows.length
+    ? `<div style="overflow-x:auto"><table><thead><tr><th>When</th><th>Who</th><th>What</th></tr></thead><tbody>${rows.join("")}</tbody></table></div>`
+    : `<p class="muted small">No audit entries yet.</p>`;
+}
+
+// ---------- backups / archives / restore ----------
+function snapshotData(stripImages){
+  const prizes = {};
+  Object.entries(S.prizes).forEach(([id,p]) => {
+    prizes[id] = stripImages ? { ...p, img: "" } : { ...p };
+  });
+  return { v: 1, savedAt: new Date().toISOString(),
+    game: S.game, bag: S.bag, players: S.players, chips: S.chips, prizes };
+}
+function downloadFile(name, content, type){
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([content], { type }));
+  a.download = name; a.click();
+}
+function stamp(){ return new Date().toISOString().slice(0,10); }
+function downloadBackup(){
+  downloadFile(`chip-draw-${stamp()}.json`,
+    JSON.stringify(snapshotData(false), null, 1), "application/json");
+  downloadCSV();
+  toast("Backup downloaded (JSON + CSV)");
 }
 function downloadCSV(){
   const rows = [["Player","Email","Chip value","Prize bucket","Owed","Paid","Balance"]];
@@ -868,11 +1117,97 @@ function downloadCSV(){
   Object.entries(S.players).forEach(([u,pl]) => rows.push([
     pl.name, pl.email, "", "TOTALS", owedBy(u), pl.paid||0, balanceOf(u)
   ]));
+  prizesArr().forEach(p => rows.push([
+    p.winnerName || "", p.winnerEmail || "", p.winnerValue ?? "",
+    "WINNER: " + p.name, "", "", ""
+  ]));
   const csv = rows.map(r => r.map(x => `"${String(x).replace(/"/g,'""')}"`).join(",")).join("\n");
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(new Blob([csv], {type:"text/csv"}));
-  a.download = "chip-draw.csv"; a.click();
+  downloadFile(`chip-draw-${stamp()}.csv`, csv, "text/csv");
 }
+async function cloudArchive(){
+  const data = snapshotData(true); // strip prize photos to stay under the 1MB doc cap
+  const json = JSON.stringify(data);
+  if (json.length > 900000){ toast("Too large for a cloud archive — use the file download."); return; }
+  await addDoc(collection(db,"archives"), {
+    tag: (S.game?.title || "Chip Draw") + " — " + stamp(),
+    at: serverTimestamp(), json
+  });
+  audit("archive", "saved to cloud");
+  toast("Archived to cloud (prize photos not included)");
+}
+async function listArchives(){
+  const out = $("#archive-out");
+  out.innerHTML = `<p class="muted small">Loading…</p>`;
+  const qs = await getDocs(query(collection(db,"archives"), orderBy("at","desc"), limit(20)));
+  const rows = [];
+  qs.forEach(d => {
+    const a = d.data();
+    rows.push(`<div class="place-row"><div class="grow small">${esc(a.tag)}</div>
+      <button class="btn mini" data-dlarch="${d.id}">⬇</button>
+      <button class="btn mini" data-restorearch="${d.id}">Restore</button></div>`);
+  });
+  out.innerHTML = rows.length ? rows.join("") : `<p class="muted small">No cloud archives yet.</p>`;
+  const docsById = {}; qs.forEach(d => docsById[d.id] = d.data());
+  out.querySelectorAll("[data-dlarch]").forEach(b => b.addEventListener("click", () => {
+    const a = docsById[b.dataset.dlarch];
+    downloadFile(`archive-${esc(a.tag)}.json`, a.json, "application/json");
+  }));
+  out.querySelectorAll("[data-restorearch]").forEach(b => b.addEventListener("click", async () => {
+    try{ await restoreData(JSON.parse(docsById[b.dataset.restorearch].json)); }
+    catch(e){ toast(e.code || e.message); }
+  }));
+}
+async function restoreFromFile(){
+  const f = $("#restore-file")?.files[0];
+  if (!f){ toast("Pick a backup JSON file first."); return; }
+  const data = JSON.parse(await f.text());
+  await restoreData(data);
+}
+async function restoreData(data){
+  if (!data || !data.game || !data.chips){ toast("That doesn't look like a chip-draw backup."); return; }
+  const ok = await confirmDialog("Restore this backup?",
+    `<p class="small">Saved ${esc(data.savedAt || "?")} — ${Object.keys(data.chips).length} chips, ${Object.keys(data.players||{}).length} players, ${Object.keys(data.prizes||{}).length} prizes.</p>
+     <p class="small muted"><b>This wipes the current game</b> and replaces it with the backup. A safety backup of the current state downloads first.</p>`, "Wipe & restore");
+  if (!ok) return;
+  downloadBackup();
+  await wipeCollections();
+  const batchWrites = [];
+  let batch = writeBatch(db), n = 0;
+  const push = (ref, d) => { batch.set(ref, d); if (++n >= 400){ batchWrites.push(batch.commit()); batch = writeBatch(db); n = 0; } };
+  Object.entries(data.players||{}).forEach(([id,d]) => push(doc(db,"players",id), d));
+  Object.entries(data.chips||{}).forEach(([id,d]) => push(doc(db,"chips",id), d));
+  Object.entries(data.prizes||{}).forEach(([id,d]) => push(doc(db,"prizes",id), d));
+  batchWrites.push(batch.commit());
+  await Promise.all(batchWrites);
+  await setDoc(doc(db,"config","bag"), data.bag || { groups: [] });
+  await setDoc(doc(db,"config","game"), data.game);
+  audit("restore", `restored backup from ${data.savedAt || "?"}`);
+  toast("Backup restored");
+}
+async function wipeCollections(){
+  for (const col of ["chips","prizes","players","adminAlerts"]){
+    const qs = await getDocs(collection(db,col));
+    let batch = writeBatch(db), n = 0; const jobs = [];
+    qs.forEach(d => { batch.delete(d.ref); if (++n >= 400){ jobs.push(batch.commit()); batch = writeBatch(db); n = 0; } });
+    jobs.push(batch.commit());
+    await Promise.all(jobs);
+  }
+  await deleteDoc(doc(db,"config","liveDraw")).catch(()=>{});
+}
+async function clearGame(){
+  const ok = await confirmDialog("Clear game for a new run?",
+    `<p class="small">This archives the current game first (cloud + file download), then wipes chips, prizes, players, and payments, empties the bag, and resets to SETUP.</p>`, "Archive & clear");
+  if (!ok) return;
+  downloadBackup();
+  await cloudArchive().catch(()=>{});
+  await wipeCollections();
+  await setDoc(doc(db,"config","bag"), { groups: [] });
+  await setDoc(doc(db,"config","game"), { title: S.game?.title || "Chip Draw Raffle",
+    state:"setup", unassignedRule:"warn", unpaidCap: S.game?.unpaidCap || 0, unpaidAtLock:false });
+  audit("clear", "game cleared for new run");
+  toast("Cleared — ready for a new game");
+}
+
 document.addEventListener("focusout", () => {
   if (S.isAdmin && S.view === "admin")
     setTimeout(() => { if (!adminEditing()) renderAdminPanel(); }, 150);

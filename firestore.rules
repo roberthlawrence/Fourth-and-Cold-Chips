@@ -2,59 +2,75 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    // Keep this list identical to ADMIN_EMAILS in firebase-config.js (lowercase).
-    function isAdmin() {
-      return request.auth != null
-        && request.auth.token.email != null
+    // ===== EDIT THESE TWO LISTS (lowercase gmail addresses) =====
+    // Keep them identical to POWER_ADMIN_EMAILS / PAYMENT_ADMIN_EMAILS
+    // in firebase-config.js. Use the exact address you sign in with.
+    function isPower() {
+      return request.auth != null && request.auth.token.email != null
         && request.auth.token.email.lower() in [
           "you@gmail.com"
         ];
     }
+    function isPay() {
+      return request.auth != null && request.auth.token.email != null
+        && request.auth.token.email.lower() in [
+          "paymentadmin1@gmail.com"
+        ];
+    }
+    // ============================================================
+    function isAdmin() { return isPower() || isPay(); }
     function signedIn() { return request.auth != null; }
 
-    // Game settings — admin writes only
     match /config/game {
       allow read: if signedIn();
-      allow write: if isAdmin();
+      allow write: if isPower();
     }
-
-    // The bag — players decrement it inside the draw transaction
     match /config/bag {
       allow read: if signedIn();
-      allow create, update: if signedIn();
-      allow delete: if isAdmin();
+      allow create, update: if signedIn();   // players decrement during draws
+      allow delete: if isPower();
+    }
+    match /config/liveDraw {
+      allow read: if signedIn();
+      allow write: if isAdmin();             // payment admins can run drawings
     }
 
-    // Players — own doc only; 'paid' can only be changed by admins
     match /players/{uid} {
       allow read: if signedIn();
-      allow create: if signedIn() && request.auth.uid == uid
-        && request.resource.data.paid == 0;
+      allow create: if isPower()
+        || (signedIn() && request.auth.uid == uid
+            && request.resource.data.paid == 0);
       allow update: if isAdmin()
         || (request.auth.uid == uid
             && request.resource.data.paid == resource.data.paid);
-      allow delete: if isAdmin();
+      allow delete: if isPower();
     }
 
-    // Chips — created by their owner during a draw; moved by owner or admin
     match /chips/{chipId} {
       allow read: if signedIn();
-      allow create: if signedIn()
-        && request.resource.data.owner == request.auth.uid;
-      allow update: if isAdmin() || resource.data.owner == request.auth.uid;
-      allow delete: if isAdmin();
+      allow create: if isPower()
+        || (signedIn() && request.resource.data.owner == request.auth.uid);
+      allow update: if isPower() || resource.data.owner == request.auth.uid;
+      allow delete: if isPower();
     }
 
     match /prizes/{prizeId} {
       allow read: if signedIn();
-      allow write: if isAdmin();
+      allow create, delete: if isPower();
+      // payment admins may only record drawing results
+      allow update: if isPower()
+        || (isPay() && request.resource.data.diff(resource.data).affectedKeys()
+              .hasOnly(['winnerChipId','winnerName','winnerEmail','winnerValue','drawnAt']));
     }
 
     match /adminAlerts/{alertId} {
       allow read, write: if isAdmin();
     }
 
-    // Append-only audit trail
+    match /archives/{archiveId} {
+      allow read, write: if isPower();
+    }
+
     match /audit/{entryId} {
       allow read: if isAdmin();
       allow create: if signedIn();
