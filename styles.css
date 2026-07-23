@@ -176,7 +176,7 @@ details.bagodds summary::-webkit-details-marker{display:none}
 .prize{background:#fff;border:1px solid var(--line);border-radius:var(--radius);
   margin-bottom:12px;overflow:hidden;box-shadow:0 1px 3px rgba(32,26,22,.06)}
 .prize.won{border-color:var(--gold);box-shadow:0 0 0 2px var(--gold)}
-.prize img{width:100%;max-height:170px;object-fit:cover;display:block}
+.prize img{width:100%;max-height:240px;object-fit:contain;display:block;background:var(--tan)}
 .prize .pad{padding:13px 14px}
 .prize .counts{display:flex;gap:14px;margin-top:8px;font-size:13px;color:var(--chalk);
   font-family:var(--data)}
@@ -232,3 +232,9 @@ td input{padding:6px 8px;max-width:80px}
   background:var(--red);margin-right:4px;animation:livepulse 1.2s infinite}
 @keyframes livepulse{0%,100%{opacity:1}50%{opacity:.3}}
 @media (prefers-reduced-motion:reduce){.livedot{animation:none}}
+
+#draw-bag{width:112px;height:auto;display:block;filter:drop-shadow(0 6px 8px rgba(32,26,22,.35))}
+.stepper input{width:64px;text-align:center;font-weight:700;font-family:var(--data);padding:7px 4px}
+.swatch{display:inline-block;width:14px;height:14px;border-radius:50%;vertical-align:-2px;
+  border:2px solid var(--gold)}
+#tab-live .results .place-row{border-bottom-color:var(--tan)}

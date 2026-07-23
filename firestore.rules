@@ -7,7 +7,7 @@ service cloud.firestore {
     // only email you ever have to hardcode — every other admin is
     // added from the Admins section inside the app.
     function bootstrapPower() {
-      return ["you@gmail.com"];
+      return ["roberthlawrence@gmail.com"];
     }
     // =========================================================
 
@@ -36,6 +36,10 @@ service cloud.firestore {
     match /config/game {
       allow read: if signedIn();
       allow write: if isPower();
+      // payment admins may only start/stop the live raffle
+      allow update: if isPower()
+        || (isPay() && request.resource.data.diff(resource.data)
+              .affectedKeys().hasOnly(['raffleLive']));
     }
     match /config/admins {
       allow read: if signedIn();
@@ -73,7 +77,7 @@ service cloud.firestore {
         || (signedIn()
             && request.resource.data.owner == resource.data.owner
             && request.resource.data.value == resource.data.value);
-      allow delete: if isPower();
+      allow delete: if isAdmin();   // payment admins can release chips to the bag
     }
 
     match /prizes/{prizeId} {
@@ -83,6 +87,11 @@ service cloud.firestore {
       allow update: if isPower()
         || (isPay() && request.resource.data.diff(resource.data).affectedKeys()
               .hasOnly(['winnerChipId','winnerName','winnerEmail','winnerValue','drawnAt']));
+    }
+
+    match /payments/{paymentId} {
+      allow read, create, delete: if isAdmin();
+      allow update: if false;
     }
 
     match /adminAlerts/{alertId} {

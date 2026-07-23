@@ -55,7 +55,9 @@
     <div id="seg">
       <button data-view="chips" class="active">My Chips</button>
       <button data-view="prizes">Prizes</button>
+      <button data-view="live" id="segLive" class="hidden">🔴 Live</button>
     </div>
+    <section id="tab-live" class="tab hidden"></section>
     <section id="tab-chips" class="tab"></section>
     <section id="tab-prizes" class="tab hidden"></section>
     <section id="panel-admin" class="hidden"></section>
@@ -67,10 +69,23 @@
 <div id="modal-draw" class="modal hidden">
   <div class="modal-body center">
     <div id="draw-stage">
-      <div id="draw-bag">🎒</div>
+      <svg id="draw-bag" viewBox="0 0 140 150" xmlns="http://www.w3.org/2000/svg" aria-label="chip bag">
+        <path d="M52,20 Q70,8 88,20" fill="none" stroke="#8F4100" stroke-width="5" stroke-linecap="round"/>
+        <path d="M50,24 h40 l-7,20 h-26 z" fill="#8F4100"/>
+        <rect x="47" y="22" width="46" height="8" rx="4" fill="#6E3200"/>
+        <path d="M36,44 C14,60 11,106 30,124 C46,139 94,139 110,124 C129,106 126,60 104,44 C92,35 48,35 36,44 Z"
+              fill="#BF5700" stroke="#8F4100" stroke-width="4"/>
+        <g fill="#F2EAD8">
+          <path d="M28,84 C36,66 54,61 70,68 C86,61 104,66 112,84 C101,79 89,76 81,80 L81,84 C81,95 59,95 59,84 L59,80 C51,76 39,79 28,84 Z"/>
+          <path d="M61,86 h18 l-3.5,17 q-5.5,6 -11,0 z"/>
+          <circle cx="66" cy="92" r="1.8" fill="#BF5700"/>
+          <circle cx="74" cy="92" r="1.8" fill="#BF5700"/>
+        </g>
+      </svg>
       <div id="draw-chip" class="chip big hidden"><span></span></div>
     </div>
     <p id="draw-text">Reaching in…</p>
+    <p id="draw-total" class="small"></p>
     <div id="draw-baginfo" class="baginfo small muted"></div>
     <div id="draw-actions" class="hidden">
       <button class="btn primary" id="draw-again">Draw another</button>
@@ -113,6 +128,7 @@
       <canvas id="wheel" width="320" height="320"></canvas>
     </div>
     <p id="wheel-status" class="small muted"></p>
+    <p id="wheel-mycolor" class="small"></p>
     <div id="wheel-winner" class="hidden"></div>
     <p class="small muted" style="margin-top:8px">Every chip is one equal slice. The winner is picked with the browser's cryptographic random generator and logged to the audit trail.</p>
     <button class="btn ghost" id="wheel-close" style="margin-top:8px">Close</button>

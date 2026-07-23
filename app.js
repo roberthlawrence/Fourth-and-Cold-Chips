@@ -23,12 +23,16 @@ const db   = getFirestore(app);
 const POWER = (CFG.POWER_ADMIN_EMAILS || CFG.ADMIN_EMAILS || []).map(e=>e.toLowerCase());
 const PAY   = (CFG.PAYMENT_ADMIN_EMAILS || []).map(e=>e.toLowerCase());
 
-// Same collectors as the squares board
-const VENMO = [
-  { label: "Pay Marcus", handle: "marcus-dawes"  },
-  { label: "Pay Dan",    handle: "dan-huskerson" },
-  { label: "Pay Randyn", handle: "randyn-tenery" }
+// Default collectors (same as the squares board) — editable in admin Settings
+const DEFAULT_VENMO = [
+  { label: "Marcus", handle: "marcus-dawes",  note: "" },
+  { label: "Dan",    handle: "dan-huskerson", note: "" },
+  { label: "Randyn", handle: "randyn-tenery", note: "" }
 ];
+const venmoList = () => {
+  const l = (S.game?.venmoList || []).filter(v => v && v.handle);
+  return l.length ? l : DEFAULT_VENMO;
+};
 
 // ---------- state ----------
 const S = {
@@ -97,11 +101,14 @@ function audit(action, detail){
     who: S.email || S.me?.name || S.uid || "?", action, detail: detail || "" }).catch(()=>{});
 }
 function venmoBtns(amount){
-  const note = encodeURIComponent(S.game?.title || "4th & Cold Chip Draw");
-  return `<div class="venmoBtns">` + VENMO.map(v =>
+  const memo = encodeURIComponent(S.game?.title || "4th & Cold Chip Draw");
+  const btns = venmoList().map(v =>
     `<a class="btn primary mini" target="_blank" rel="noopener"
-      href="https://venmo.com/${v.handle}?txn=pay&amount=${amount.toFixed(2)}&note=${note}">${v.label}</a>`
-  ).join("") + `</div>`;
+      href="https://venmo.com/${esc(v.handle)}?txn=pay&amount=${amount.toFixed(2)}&note=${memo}">Pay ${esc(v.label)}</a>`
+  ).join("");
+  const notes = venmoList().filter(v => v.note)
+    .map(v => `<div class="small muted">${esc(v.label)}: ${esc(v.note)}</div>`).join("");
+  return `<div class="venmoBtns">${btns}</div>${notes}`;
 }
 
 // derived
@@ -281,6 +288,7 @@ function setView(v){
   $("#seg").classList.toggle("hidden", v === "admin");
   $("#tab-chips").classList.toggle("hidden", v !== "chips");
   $("#tab-prizes").classList.toggle("hidden", v !== "prizes");
+  $("#tab-live").classList.toggle("hidden", v !== "live");
   $("#panel-admin").classList.toggle("hidden", v !== "admin");
   $("#adminBtn").textContent = v === "admin" ? "Exit admin" : "Admin";
   renderAll();
@@ -314,8 +322,11 @@ function renderAll(){
   maybeShow();
   if (!S.me) return;
   $("#brandSeason").textContent = (S.game?.title || "CHIP DRAW").toUpperCase();
+  const live = !!S.game?.raffleLive;
+  $("#segLive").classList.toggle("hidden", !live && S.view !== "live");
+  if (!live && S.view === "live") setView("prizes");
   renderBalancePill(); renderBanners();
-  renderChipsTab(); renderPrizesTab();
+  renderChipsTab(); renderPrizesTab(); renderLiveTab();
   if (S.view === "admin"){
     if (S.isAdmin) renderAdminPanel(); else setView("chips");
   }
@@ -350,7 +361,7 @@ function renderBanners(){
   if (S.isAdmin){
     if ((state === "locked" || state === "complete") && anyUnpaid()){
       const list = Object.keys(S.players).filter(u => balanceOf(u) > 0.005)
-        .map(u => `${esc(S.players[u].name)} (${money(balanceOf(u))})`).join(", ");
+        .map(u => `${esc(S.players[u].name)} &lt;${esc(S.players[u].email)}&gt; (${money(balanceOf(u))})`).join(", ");
       B.push(`<div class="banner alert"><div class="grow"><b>Admin — unpaid balances after lock:</b> ${list}</div></div>`);
     }
     if (S.game?.unpaidAtLock && (state === "locked" || state === "complete")){
@@ -405,7 +416,6 @@ function renderChipsTab(){
     return `<div class="place-row">
       <div class="stack-item">${chipHTML(g.value,"mini")}<span class="stack-count">×${g.n}</span></div>
       <div class="grow small">${esc(where)}</div>
-      ${state==="open" ? `<button class="btn mini" data-move="${g.value}|${g.bucket||""}">Move</button>` : ""}
     </div>`;
   }).join("");
 
@@ -425,15 +435,11 @@ function renderChipsTab(){
       <div class="row spread"><span>Balance</span>
         <b class="num ${owed-paid>0.005?"owefig":"okfig"}">${money(owed-paid)}</b></div>
       ${owed-paid>0.005 ? venmoBtns(owed-paid) : ""}
-      <p class="muted small" style="margin-top:10px">Every chip = one entry on whatever prize you place it. The dollar value is what you pay — it doesn't change your odds.</p>
+      <p class="muted small" style="margin-top:10px">Every chip = one entry on whatever prize you place it. The dollar value is what you pay — it doesn't change your odds. Place and move chips from the Prizes tab.</p>
     </div>`;
   $("#btn-draw")?.addEventListener("click", openDraw);
   el.querySelector(".bagodds")?.addEventListener("toggle",
     e => { S.oddsOpen = e.target.open; });
-  el.querySelectorAll("[data-move]").forEach(b => b.addEventListener("click", () => {
-    const [v, bucket] = b.dataset.move.split("|");
-    openMoveSheet(Number(v), bucket || null);
-  }));
 }
 
 // ---------- draw ----------
@@ -445,9 +451,11 @@ async function runDraw(){
   bagEl.classList.remove("hidden");
   bagEl.classList.remove("shake"); void bagEl.offsetWidth; bagEl.classList.add("shake");
   txt.textContent = "Reaching in…"; info.innerHTML = "";
+  $("#draw-total").innerHTML = "";
   try{
+    const minShake = new Promise(r => setTimeout(r, 650));
     const value = await drawChipTx();
-    await new Promise(r => setTimeout(r, 900));
+    await minShake;
     bagEl.classList.add("hidden");
     const st = chipStyle(value);
     chipEl.className = `chip big ${st.dark?"dark":""} reveal`;
@@ -455,6 +463,9 @@ async function runDraw(){
     chipEl.querySelector("span").textContent = "$" + value;
     chipEl.classList.remove("hidden");
     txt.innerHTML = `You pulled a <b>${money(value)}</b> chip!`;
+    const n = myChips().length, owedNow = owedBy(S.playerKey);
+    $("#draw-total").innerHTML =
+      `Your stack: <b>${n}</b> chip${n===1?"":"s"} · total owed <b>${money(owedNow)}</b>`;
     info.innerHTML = bagInfoHTML(false);
     audit("draw", `${S.me.name} drew $${value}`);
   }catch(ex){
@@ -519,13 +530,11 @@ function renderPrizesTab(){
             <span>yours: <b class="num">${mine}</b></span></div>
           ${won ? `<div class="winline">🏆 Winner: ${esc(winChip?.ownerName || p.winnerName || "?")}</div>` : ""}
           ${state==="open" ? `<div class="btnrow">
-              <button class="btn mini primary" data-add="${p.id}" ${unallocated?"":"disabled"}>Add chips</button>
-              ${mine ? `<button class="btn mini" data-pull="${p.id}">Move mine out</button>` : ""}
+              <button class="btn mini primary" data-upd="${p.id}">Update chips${mine?` (${mine} here)`:""}</button>
             </div>` : ""}
         </div></div>`;
     }).join("")}`;
-  el.querySelectorAll("[data-add]").forEach(b => b.addEventListener("click", () => openPlaceSheet(b.dataset.add)));
-  el.querySelectorAll("[data-pull]").forEach(b => b.addEventListener("click", () => openPullSheet(b.dataset.pull)));
+  el.querySelectorAll("[data-upd]").forEach(b => b.addEventListener("click", () => openUpdateSheet(b.dataset.upd)));
 }
 
 // ---------- place / move sheets ----------
@@ -541,90 +550,68 @@ $("#place-confirm").addEventListener("click", async () => {
   if (placeAction){ try{ await placeAction(); }catch(e){ toast(e.message); } }
   $("#modal-place").classList.add("hidden");
 });
-function stepperRow(label, max, key){
-  return `<div class="place-row"><div class="grow small">${label}</div>
-    <div class="stepper" data-key="${key}" data-max="${max}">
-      <button type="button" class="dec">−</button><span class="val num">0</span>
-      <button type="button" class="inc">+</button></div></div>`;
-}
-function wireSteppers(){
-  $$("#place-content .stepper").forEach(st => {
-    const val = st.querySelector(".val"), max = Number(st.dataset.max);
-    st.querySelector(".inc").addEventListener("click", () => {
-      val.textContent = Math.min(max, Number(val.textContent)+1); });
-    st.querySelector(".dec").addEventListener("click", () => {
-      val.textContent = Math.max(0, Number(val.textContent)-1); });
-  });
-}
-function stepperVals(){
-  const out = {};
-  $$("#place-content .stepper").forEach(st => out[st.dataset.key] = Number(st.querySelector(".val").textContent));
-  return out;
-}
-function openPlaceSheet(pid){
+function openUpdateSheet(pid){
   const p = S.prizes[pid]; if (!p) return;
-  const free = myChips().filter(c => !c.bucket);
-  const byVal = {};
-  free.forEach(c => byVal[c.value] = (byVal[c.value]||0)+1);
-  const rows = Object.keys(byVal).map(Number).sort((a,b)=>a-b)
-    .map(v => stepperRow(`$${v} chips (you have ${byVal[v]} unplaced)`, byVal[v], "v"+v)).join("");
-  openSheet(`Add chips → ${p.name}`, rows || "<p class='muted'>No unplaced chips.</p>", async () => {
-    const want = stepperVals();
-    const batch = writeBatch(db); let n = 0;
-    for (const [k,count] of Object.entries(want)){
-      const v = Number(k.slice(1));
-      free.filter(c=>c.value===v).slice(0,count).forEach(c => {
-        batch.update(doc(db,"chips",c.id), { bucket: pid, movedAt: serverTimestamp() }); n++;
-      });
-    }
-    if (!n) return;
-    await batch.commit();
-    toast(`${n} chip${n>1?"s":""} placed on ${p.name}`);
-  });
-  wireSteppers();
-}
-function openPullSheet(pid){
-  const p = S.prizes[pid]; if (!p) return;
-  const mine = myChips().filter(c => c.bucket === pid);
-  const byVal = {};
-  mine.forEach(c => byVal[c.value] = (byVal[c.value]||0)+1);
-  const rows = Object.keys(byVal).map(Number).sort((a,b)=>a-b)
-    .map(v => stepperRow(`$${v} chips (${byVal[v]} here)`, byVal[v], "v"+v)).join("");
-  openSheet(`Move out of ${p.name}`, rows, async () => {
-    const want = stepperVals();
-    const batch = writeBatch(db); let n = 0;
-    for (const [k,count] of Object.entries(want)){
-      const v = Number(k.slice(1));
-      mine.filter(c=>c.value===v).slice(0,count).forEach(c => {
-        batch.update(doc(db,"chips",c.id), { bucket: null, movedAt: serverTimestamp() }); n++;
-      });
-    }
-    if (!n) return;
-    await batch.commit();
-    toast(`${n} chip${n>1?"s":""} moved back to your stack`);
-  });
-  wireSteppers();
-}
-function openMoveSheet(value, fromBucket){
-  const mine = myChips().filter(c => c.value===value && (c.bucket||null)===(fromBucket||null));
-  const opts = [`<option value="">— Not placed —</option>`]
-    .concat(prizesArr().map(p => `<option value="${p.id}" ${p.id===fromBucket?"disabled":""}>${esc(p.name)}</option>`)).join("");
-  const from = fromBucket ? (S.prizes[fromBucket]?.name || "removed prize") : "your unplaced stack";
-  openSheet(`Move $${value} chips`, `
-    <p class="small muted">From ${esc(from)} — you have ${mine.length} there.</p>
-    ${stepperRow("How many to move", mine.length, "n")}
-    <label>Move to<select id="move-dest">${opts}</select></label>`,
+  const mine = myChips();
+  const onThis = mine.filter(c => c.bucket === pid).length;
+  const unplaced = mine.filter(c => !c.bucket).length;
+  const max = onThis + unplaced;
+  openSheet(`${p.name}`, `
+    <p class="small muted">You have <b>${mine.length}</b> chip${mine.length===1?"":"s"} total ·
+      <b>${unplaced}</b> not placed. Chip type doesn't matter — every chip is one entry.</p>
+    <div class="place-row"><div class="grow small">Your chips on this prize</div>
+      <div class="stepper">
+        <button type="button" id="upd-dec">−</button>
+        <input id="upd-count" type="number" min="0" max="${max}" value="${onThis}">
+        <button type="button" id="upd-inc">+</button>
+      </div></div>
+    <button type="button" class="btn mini" id="upd-all" style="margin-top:8px">Put all remaining here (${max} total)</button>`,
     async () => {
-      const n = stepperVals().n || 0;
-      const dest = $("#move-dest").value || null;
-      if (!n) return;
+      let want = Math.round(Number($("#upd-count").value) || 0);
+      want = Math.max(0, Math.min(max, want));
+      const diff = want - onThis;
+      if (!diff) return;
       const batch = writeBatch(db);
-      mine.slice(0,n).forEach(c => batch.update(doc(db,"chips",c.id),
-        { bucket: dest, movedAt: serverTimestamp() }));
+      if (diff > 0){
+        mine.filter(c => !c.bucket).slice(0, diff).forEach(c =>
+          batch.update(doc(db,"chips",c.id), { bucket: pid, movedAt: serverTimestamp() }));
+      } else {
+        mine.filter(c => c.bucket === pid).slice(0, -diff).forEach(c =>
+          batch.update(doc(db,"chips",c.id), { bucket: null, movedAt: serverTimestamp() }));
+      }
       await batch.commit();
-      toast(`${n} chip${n>1?"s":""} moved`);
+      toast(`${p.name}: now ${want} of your chips`);
     });
-  wireSteppers();
+  const inp = $("#upd-count");
+  $("#upd-dec").addEventListener("click", () => inp.value = Math.max(0, Number(inp.value||0) - 1));
+  $("#upd-inc").addEventListener("click", () => inp.value = Math.min(max, Number(inp.value||0) + 1));
+  $("#upd-all").addEventListener("click", () => inp.value = max);
+}
+
+// ---------- LIVE tab ----------
+function renderLiveTab(){
+  const el = $("#tab-live");
+  if (S.view !== "live") return;
+  const ps = prizesArr();
+  const done = ps.filter(p => p.winnerChipId)
+    .sort((a,b) => (a.drawnAt?.seconds||0) - (b.drawnAt?.seconds||0));
+  const pending = ps.filter(p => !p.winnerChipId);
+  el.innerHTML = `
+    <div class="card center" style="margin-top:14px">
+      <p class="eyebrow"><span class="livedot"></span> RAFFLE IS LIVE</p>
+      <p class="small" style="margin-top:8px">Your color on the wheel:
+        <span class="swatch" style="background:hsl(${ownerHue(S.playerKey)},52%,46%)"></span>
+        — your slices also get a gold ring.</p>
+      <p class="muted small" style="margin-top:6px">Keep this open — the wheel pops up automatically when each drawing starts.</p>
+    </div>
+    <h2>Results (${done.length}/${ps.length})</h2>
+    <div class="card results">
+      ${done.length ? done.map(p => `<div class="place-row">
+          <div class="grow small"><b>${esc(p.name)}</b></div>
+          <div class="small">🏆 ${esc(p.winnerName || "?")}</div></div>`).join("")
+        : `<p class="muted small">No winners drawn yet.</p>`}
+      ${pending.length ? `<p class="muted small" style="margin-top:8px">${pending.length} prize${pending.length===1?"":"s"} still to draw.</p>` : ""}
+    </div>`;
 }
 
 // ============================================================
@@ -668,6 +655,11 @@ function startWheel(ld){
   const cv = $("#wheel"), ctx = cv.getContext("2d");
   const D = ld.durationMs || 10000;
   $("#wheel-status").textContent = `${N} chip${N===1?"":"s"} in — spinning…`;
+  const myCount = entries.filter(c => c.owner === S.playerKey).length;
+  $("#wheel-mycolor").innerHTML = myCount
+    ? `Your color: <span class="swatch" style="background:hsl(${ownerHue(S.playerKey)},52%,46%)"></span>
+       — ${myCount} slice${myCount===1?"":"s"}, gold ring`
+    : `<span class="muted">You have no chips on this prize.</span>`;
   if (!N || winIdx < 0){ showWheelResult(ld); return; }
   const slice = (Math.PI * 2) / N;
   // land the winning slice's center under the top pointer (-90°)
@@ -772,17 +764,22 @@ function renderAdminPanel(force){
   const unallocAll = chipsArr().filter(c=>!c.bucket).length;
   const allDrawn = ps.length && ps.every(p=>p.winnerChipId);
 
+  const raffleLive = !!g.raffleLive;
   const drawingSection = `
     <h2>Drawings</h2>
     ${state!=="locked" && state!=="complete"
       ? `<p class="muted small">Lock buckets first — drawings run after the lock.</p>`
-      : ps.map(p=>`<div class="card">
+      : (!raffleLive ? `<div class="card center">
+          <button class="btn primary block" data-act="startraffle">🔴 Start raffle</button>
+          <p class="muted small" style="margin-top:8px">Resolves any unplaced chips (you'll see who), then opens the Live tab on every player's phone. Wheels can spin after this.</p>
+        </div>` : `<div class="banner win"><div class="grow">🔴 <b>Raffle is live.</b> Run each prize below — everyone sees the wheel.</div></div>`)
+      + ps.map(p=>`<div class="card">
           <div class="row spread"><b>${esc(p.name)}</b>
             <span class="muted small num">${bucketCount(p.id)} chips</span></div>
           ${p.winnerChipId
             ? `<p class="small" style="color:var(--orange-deep);font-weight:700;margin-top:6px">🏆 ${esc(p.winnerName||S.chips[p.winnerChipId]?.ownerName||"?")}</p>`
             : `<div class="row gap">
-                <button class="btn mini gold" data-livedraw="${p.id}">🎡 Live wheel draw</button>
+                <button class="btn mini gold" data-livedraw="${p.id}" ${raffleLive?"":"disabled"}>🎡 Live wheel draw</button>
                 <button class="btn mini" data-drawwin="${p.id}">Quick draw (no wheel)</button>
               </div>`}
         </div>`).join("")}
@@ -798,12 +795,19 @@ function renderAdminPanel(force){
           <td>${esc(pl.name)}<br><span class="muted small">${esc(pl.email)}</span></td>
           <td class="num">${chipsArr().filter(c=>c.owner===u).length}</td>
           <td class="num">${money(o)}</td>
-          <td><input type="number" step="0.01" min="0" class="pay-in num" data-u="${u}" value="${pl.paid||0}"></td>
+          <td class="num">${money(pl.paid||0)}</td>
           <td class="num ${bal>0.005?"owefig":"okfig"}">${money(bal)}</td>
-          <td><button class="btn mini" data-paidfull="${u}">Paid ✓</button></td>
+          <td><button class="btn mini" data-logpay="${u}">Log payment</button>
+              <button class="btn mini danger" data-release="${u}">Release chips</button></td>
         </tr>`;}).join("")}</tbody></table>
-      <button class="btn mini" style="margin-top:10px" data-act="savepays">Save payment edits</button>
-      <button class="btn mini" data-act="csv">Download CSV</button>
+    </div>
+    <div class="card">
+      <h3>Payment log</h3>
+      <div class="row gap" style="margin-top:0;flex-wrap:wrap">
+        <button class="btn mini" data-act="loadpaylog">Load payment log</button>
+        <button class="btn mini" data-act="dlpaylog">⬇ Download pay log CSV</button>
+      </div>
+      <div id="paylog-out" style="margin-top:10px"></div>
     </div>`;
 
   const footer = `
@@ -839,6 +843,17 @@ function renderAdminPanel(force){
       <label>Game title<input id="set-title" value="${esc(g.title||"")}"></label>
       <label>Unpaid limit — block draws once a player owes this much ($0 = off)
         <input id="set-cap" type="number" min="0" step="1" value="${g.unpaidCap||0}"></label>
+      <h3 style="margin-top:14px">Venmo collectors</h3>
+      <p class="muted small" style="margin-bottom:8px">Name · Venmo handle (no @) · note on who should pay them. Players see one Pay button per row, preloaded with their balance.</p>
+      <div id="vm-rows">
+        ${venmoList().map(v=>`<div class="bb-row vm-row">
+          <input class="vm-label" placeholder="Name" value="${esc(v.label||"")}" style="max-width:90px">
+          <input class="vm-handle" placeholder="venmo-handle" value="${esc(v.handle||"")}" style="max-width:150px">
+          <input class="vm-note" placeholder="who pays them (note)" value="${esc(v.note||"")}">
+          <button class="btn mini danger vm-del">✕</button>
+        </div>`).join("")}
+      </div>
+      <button class="btn mini" id="vm-add" type="button">+ Add collector</button>
       <label>Unplaced chips when locking
         <select id="set-rule">
           <option value="warn" ${g.unassignedRule==="warn"?"selected":""}>Warn me and block the lock</option>
@@ -960,14 +975,24 @@ function wireAdmin(el){
     () => drawWinner(b.dataset.drawwin).catch(e=>toast(e.code||e.message))));
   el.querySelectorAll("[data-livedraw]").forEach(b => b.addEventListener("click",
     () => startLiveDraw(b.dataset.livedraw).catch(e=>toast(e.code||e.message))));
-  el.querySelectorAll("[data-paidfull]").forEach(b => b.addEventListener("click", async () => {
-    const u = b.dataset.paidfull;
-    try{
-      await updateDoc(doc(db,"players",u), { paid: owedBy(u) });
-      audit("payment", `${S.players[u].name} marked paid in full (${money(owedBy(u))})`);
-      toast("Marked paid");
-    }catch(e){ toast(e.code || e.message); }
-  }));
+  el.querySelectorAll("[data-logpay]").forEach(b => b.addEventListener("click", () => openLogPayment(b.dataset.logpay)));
+  el.querySelectorAll("[data-release]").forEach(b => b.addEventListener("click",
+    () => releaseChips(b.dataset.release).catch(e=>toast(e.code||e.message))));
+  $("#vm-add")?.addEventListener("click", () => {
+    S.adminDirty = true;
+    const holder = $("#vm-rows");
+    const row = document.createElement("div");
+    row.className = "bb-row vm-row";
+    row.innerHTML = `<input class="vm-label" placeholder="Name" style="max-width:90px">
+      <input class="vm-handle" placeholder="venmo-handle" style="max-width:150px">
+      <input class="vm-note" placeholder="who pays them (note)">
+      <button class="btn mini danger vm-del">✕</button>`;
+    holder.appendChild(row);
+    row.querySelectorAll("input").forEach(i => i.addEventListener("input", () => { S.adminDirty = true; }));
+    row.querySelector(".vm-del").addEventListener("click", () => row.remove());
+  });
+  el.querySelectorAll(".vm-del").forEach(b =>
+    b.addEventListener("click", () => { S.adminDirty = true; b.closest(".vm-row").remove(); }));
   $("#bb-add")?.addEventListener("click", () => {
     S.adminDirty = true;
     const holder = $("#bag-builder");
@@ -989,10 +1014,16 @@ function wireAdmin(el){
 async function adminAct(act){
   const gRef = doc(db,"config","game");
   if (act === "savesettings"){
+    const vms = $$(".vm-row").map(r => ({
+      label: r.querySelector(".vm-label").value.trim(),
+      handle: r.querySelector(".vm-handle").value.trim().replace(/^@/,""),
+      note: r.querySelector(".vm-note").value.trim()
+    })).filter(v => v.label && v.handle);
     await updateDoc(gRef, {
       title: $("#set-title").value.trim() || "Chip Draw Raffle",
       unpaidCap: Number($("#set-cap").value) || 0,
-      unassignedRule: $("#set-rule").value
+      unassignedRule: $("#set-rule").value,
+      venmoList: vms
     });
     toast("Settings saved"); audit("settings","updated");
   }
@@ -1025,18 +1056,12 @@ async function adminAct(act){
     const ok = await confirmDialog("Reopen the game?", "Players will be able to draw and move chips again.");
     if (ok){ await updateDoc(gRef, { state:"open" }); audit("state","reopened"); }
   }
-  if (act === "complete"){ await updateDoc(gRef, { state:"complete" }); audit("state","complete"); }
+  if (act === "complete"){ await updateDoc(gRef, { state:"complete", raffleLive:false }); audit("state","complete"); }
   if (act === "addprize") await addPrize();
-  if (act === "savepays"){
-    const batch = writeBatch(db);
-    $$(".pay-in").forEach(inp => {
-      const v = Number(inp.value) || 0;
-      if (v !== (S.players[inp.dataset.u]?.paid || 0))
-        batch.update(doc(db,"players",inp.dataset.u), { paid: v });
-    });
-    await batch.commit(); toast("Payments saved"); audit("payment","bulk edit");
-  }
   if (act === "csv") downloadCSV();
+  if (act === "startraffle") await startRaffle();
+  if (act === "loadpaylog") await loadPayLog();
+  if (act === "dlpaylog") await downloadPayLog();
   if (act === "signout"){ await signOut(auth); location.reload(); }
   if (act === "loadaudit") await loadAudit();
   if (act === "backup") downloadBackup();
@@ -1087,25 +1112,45 @@ async function permCheck(){
 }
 
 async function lockGame(){
-  const un = chipsArr().filter(c=>!c.bucket);
-  const rule = S.game.unassignedRule;
-  if (un.length){
-    if (rule === "warn" || !S.prizes[rule]){
-      const owners = [...new Set(un.map(c=>c.ownerName))].join(", ");
-      await confirmDialog("Can't lock yet",
-        `<p class="small">${un.length} chip${un.length>1?"s":""} still unplaced (${esc(owners)}).</p>
-         <p class="small muted">Have players place them, or set an auto-move bucket in Settings, then lock again.</p>`, "OK");
-      return;
-    }
-    const batch = writeBatch(db);
-    un.forEach(c => batch.update(doc(db,"chips",c.id), { bucket: rule, movedAt: serverTimestamp() }));
-    await batch.commit();
-    audit("lock", `auto-moved ${un.length} chips to ${S.prizes[rule]?.name}`);
-  }
+  const un = chipsArr().filter(c=>!c.bucket).length;
   const flag = anyUnpaid();
   await updateDoc(doc(db,"config","game"), { state:"locked", unpaidAtLock: flag });
   audit("state", "locked" + (flag ? " (unpaid balances outstanding — still valid entries)" : ""));
-  toast("Buckets locked");
+  toast("Buckets locked" + (un ? ` — ${un} unplaced chip${un===1?"":"s"} will be resolved at Start Raffle` : ""));
+}
+
+// Start Raffle: resolve unplaced chips (with the roster shown), then go live
+async function startRaffle(){
+  const un = chipsArr().filter(c => !c.bucket);
+  if (un.length){
+    const byOwner = {};
+    un.forEach(c => {
+      byOwner[c.owner] = byOwner[c.owner] || { name:c.ownerName, email:c.ownerEmail, n:0 };
+      byOwner[c.owner].n++;
+    });
+    const roster = Object.values(byOwner)
+      .map(o => `${esc(o.name)} &lt;${esc(o.email)}&gt; — ${o.n} chip${o.n===1?"":"s"}`).join("<br>");
+    const rule = S.game?.unassignedRule;
+    const opts = prizesArr().filter(p=>!p.winnerChipId).map(p =>
+      `<option value="${p.id}" ${p.id===rule?"selected":""}>${esc(p.name)}</option>`).join("");
+    const ok = await confirmDialog("Unplaced chips",
+      `<p class="small"><b>${un.length}</b> chip${un.length===1?"":"s"} never got placed:</p>
+       <p class="small">${roster}</p>
+       <label style="margin-top:10px">Move them all into
+         <select id="raffle-dest">${opts}</select></label>
+       <p class="muted small">Proceed moves the chips and starts the live raffle.</p>`,
+      "Move chips & start");
+    if (!ok) return;
+    const dest = $("#raffle-dest")?.value;
+    if (!dest || !S.prizes[dest]){ toast("Pick a destination prize."); return; }
+    const batch = writeBatch(db);
+    un.forEach(c => batch.update(doc(db,"chips",c.id), { bucket: dest, movedAt: serverTimestamp() }));
+    await batch.commit();
+    audit("raffle", `moved ${un.length} unplaced chips to ${S.prizes[dest].name} at raffle start`);
+  }
+  await updateDoc(doc(db,"config","game"), { raffleLive: true });
+  audit("raffle", "raffle started — live tab open for all players");
+  toast("🔴 Raffle is live — players now have the Live tab");
 }
 
 function readImage(file){
@@ -1182,6 +1227,95 @@ async function drawWinner(pid, quiet){
   });
   audit("winner", `${p.name} → ${win.ownerName} ($${win.value} chip, ${entries.length} entries, quick draw)`);
   if (!quiet) toast(`🏆 ${win.ownerName} wins ${p.name}!`);
+}
+
+// ---------- payments: log / unpay / release ----------
+function openLogPayment(key){
+  const pl = S.players[key]; if (!pl) return;
+  const bal = Math.max(0, balanceOf(key));
+  const opts = venmoList().map(v => `<option>${esc(v.label)}</option>`).join("")
+    + `<option>Cash / Other</option>`;
+  openSheet(`Log payment — ${pl.name}`, `
+    <p class="small muted">${esc(pl.name)} &lt;${esc(pl.email)}&gt; · balance ${money(bal)}</p>
+    <label>Amount paid<input id="pay-amt" type="number" min="0.01" step="0.01" value="${bal.toFixed(2)}"></label>
+    <label>Paid to<select id="pay-to">${opts}</select></label>`,
+    async () => {
+      const amount = Math.round((Number($("#pay-amt").value) || 0) * 100) / 100;
+      const to = $("#pay-to").value;
+      if (amount <= 0){ toast("Enter an amount."); return; }
+      await addDoc(collection(db,"payments"), {
+        playerKey: key, playerName: pl.name, playerEmail: pl.email,
+        amount, to, at: serverTimestamp(), by: S.email || "admin"
+      });
+      await updateDoc(doc(db,"players",key), { paid: (pl.paid||0) + amount });
+      audit("payment", `${pl.name} <${pl.email}> paid ${money(amount)} to ${to}`);
+      toast(`Logged ${money(amount)} from ${pl.name}`);
+    });
+}
+async function loadPayLog(){
+  const out = $("#paylog-out");
+  out.innerHTML = `<p class="muted small">Loading…</p>`;
+  const qs = await getDocs(query(collection(db,"payments"), orderBy("at","desc"), limit(200)));
+  const entries = {}; const rows = [];
+  qs.forEach(d => {
+    const p = d.data(); entries[d.id] = p;
+    const when = p.at?.toDate ? p.at.toDate().toLocaleDateString() : "";
+    rows.push(`<div class="place-row">
+      <div class="grow small">${esc(p.playerName)} <span class="muted">&lt;${esc(p.playerEmail)}&gt;</span><br>
+        <span class="muted">${esc(when)} → ${esc(p.to)}</span></div>
+      <b class="num small">${money(p.amount)}</b>
+      <button class="btn mini danger" data-unpay="${d.id}">Unpay</button></div>`);
+  });
+  out.innerHTML = rows.length ? rows.join("") : `<p class="muted small">No payments logged yet.</p>`;
+  out.querySelectorAll("[data-unpay]").forEach(b => b.addEventListener("click", async () => {
+    const id = b.dataset.unpay, p = entries[id];
+    const ok = await confirmDialog("Undo this payment?",
+      `<p class="small">${esc(p.playerName)} &lt;${esc(p.playerEmail)}&gt; — ${money(p.amount)} to ${esc(p.to)}.<br>Their balance goes back up by ${money(p.amount)}.</p>`, "Unpay");
+    if (!ok) return;
+    try{
+      await deleteDoc(doc(db,"payments",id));
+      const pl = S.players[p.playerKey];
+      if (pl) await updateDoc(doc(db,"players",p.playerKey),
+        { paid: Math.max(0, (pl.paid||0) - p.amount) });
+      audit("payment", `UNPAID: ${p.playerName} ${money(p.amount)} (was to ${p.to})`);
+      toast("Payment removed"); loadPayLog();
+    }catch(e){ toast(e.code || e.message); }
+  }));
+}
+async function downloadPayLog(){
+  const qs = await getDocs(query(collection(db,"payments"), orderBy("at","desc"), limit(1000)));
+  const rows = [["Date","Player","Email","Amount","Paid to","Logged by"]];
+  qs.forEach(d => {
+    const p = d.data();
+    rows.push([p.at?.toDate ? p.at.toDate().toLocaleString() : "", p.playerName,
+      p.playerEmail, p.amount, p.to, p.by]);
+  });
+  const csv = rows.map(r => r.map(x => `"${String(x).replace(/"/g,'""')}"`).join(",")).join("\n");
+  downloadFile(`pay-log-${stamp()}.csv`, csv, "text/csv");
+}
+async function releaseChips(key){
+  const pl = S.players[key]; if (!pl) return;
+  const theirs = chipsArr().filter(c => c.owner === key);
+  if (!theirs.length){ toast("They have no chips."); return; }
+  const owed = owedBy(key);
+  const ok = await confirmDialog("Release chips back to the bag?",
+    `<p class="small"><b>${esc(pl.name)}</b> &lt;${esc(pl.email)}&gt;</p>
+     <p class="small">This deletes all <b>${theirs.length}</b> of their chips, puts them back in the bag,
+     and clears the <b>${money(owed)}</b> they owed. Their entries in every prize are removed.</p>
+     <p class="muted small">Logged payments stay — use Unpay in the payment log if any need reversing.</p>`,
+    "Yes, release chips");
+  if (!ok) return;
+  const batch = writeBatch(db);
+  theirs.forEach(c => batch.delete(doc(db,"chips",c.id)));
+  await batch.commit();
+  const groups = (S.bag?.groups || []).map(x => ({ ...x }));
+  theirs.forEach(c => {
+    const gi = groups.findIndex(x => x.value === c.value);
+    if (gi >= 0) groups[gi].remaining += 1;
+  });
+  await setDoc(doc(db,"config","bag"), { groups });
+  audit("release", `${pl.name} <${pl.email}> — ${theirs.length} chips (${money(owed)}) returned to the bag`);
+  toast(`${theirs.length} chips back in the bag`);
 }
 
 // ---------- audit viewer ----------
@@ -1317,7 +1451,8 @@ async function clearGame(){
   await wipeCollections();
   await setDoc(doc(db,"config","bag"), { groups: [] });
   await setDoc(doc(db,"config","game"), { title: S.game?.title || "Chip Draw Raffle",
-    state:"setup", unassignedRule:"warn", unpaidCap: S.game?.unpaidCap || 0, unpaidAtLock:false });
+    state:"setup", unassignedRule:"warn", unpaidCap: S.game?.unpaidCap || 0,
+    unpaidAtLock:false, raffleLive:false, venmoList: S.game?.venmoList || [] });
   audit("clear", "game cleared for new run");
   toast("Cleared — ready for a new game");
 }
