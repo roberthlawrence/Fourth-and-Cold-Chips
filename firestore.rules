@@ -51,22 +51,28 @@ service cloud.firestore {
       allow write: if isAdmin();             // payment admins run drawings
     }
 
-    match /players/{uid} {
+    // Players are keyed by email (honor-system identity, same trust
+    // model as the squares board). 'paid' is admin-only to change.
+    match /players/{playerKey} {
       allow read: if signedIn();
       allow create: if isPower()
-        || (signedIn() && request.auth.uid == uid
-            && request.resource.data.paid == 0);
+        || (signedIn() && request.resource.data.paid == 0);
       allow update: if isAdmin()
-        || (request.auth.uid == uid
+        || (signedIn()
             && request.resource.data.paid == resource.data.paid);
       allow delete: if isPower();
     }
 
+    // Chips are owned by email key (honor system among the group).
+    // Value and owner can't be edited after the draw; only the bucket
+    // placement moves.
     match /chips/{chipId} {
       allow read: if signedIn();
-      allow create: if isPower()
-        || (signedIn() && request.resource.data.owner == request.auth.uid);
-      allow update: if isPower() || resource.data.owner == request.auth.uid;
+      allow create: if signedIn();
+      allow update: if isPower()
+        || (signedIn()
+            && request.resource.data.owner == resource.data.owner
+            && request.resource.data.value == resource.data.value);
       allow delete: if isPower();
     }
 

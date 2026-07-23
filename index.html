@@ -26,11 +26,14 @@
   <h1 class="displayHead">Pull Your<br>Chips</h1>
   <p class="muted" style="margin:10px 0 20px;max-width:300px">Draw a chip, pay what it says. Every chip is one shot at a prize.</p>
   <form id="join-form" class="card" autocomplete="on">
-    <label>Name<input id="join-name" required maxlength="40" placeholder="First Last"></label>
     <label>Email<input id="join-email" type="email" required placeholder="you@example.com"></label>
-    <label>Confirm email<input id="join-email2" type="email" required placeholder="Type it again"></label>
+    <div id="join-new" class="hidden">
+      <p class="muted small" style="margin-bottom:10px">First time here — confirm who you are:</p>
+      <label>Name<input id="join-name" maxlength="40" placeholder="First Last"></label>
+      <label>Confirm email<input id="join-email2" type="email" placeholder="Type it again"></label>
+    </div>
     <p id="join-err" class="err hidden"></p>
-    <button type="button" id="join-btn" class="btn primary block">I'm in</button>
+    <button type="button" id="join-btn" class="btn primary block">Continue</button>
   </form>
 </div>
 

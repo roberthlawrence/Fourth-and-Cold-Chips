@@ -32,7 +32,8 @@ const VENMO = [
 
 // ---------- state ----------
 const S = {
-  uid: null, email: null, isPower: false, isPay: false, isAdmin: false,
+  uid: null, email: null, playerKey: null,
+  isPower: false, isPay: false, isAdmin: false,
   game: null, bag: null, me: null, liveDraw: null,
   players: {}, chips: {}, prizes: {}, alerts: {},
   ready: { game:false, bag:false, chips:false, prizes:false, players:false },
@@ -45,6 +46,7 @@ const S = {
 const $  = s => document.querySelector(s);
 const $$ = s => [...document.querySelectorAll(s)];
 const money = n => "$" + (Math.round(n * 100) / 100).toLocaleString();
+const emailKey = e => String(e).trim().toLowerCase().replace(/[^a-z0-9]/g, "_");
 const esc = s => String(s ?? "").replace(/[&<>"']/g,
   c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 
@@ -106,7 +108,7 @@ function venmoBtns(amount){
 const chipsArr  = () => Object.entries(S.chips).map(([id,c]) => ({id, ...c}));
 const prizesArr = () => Object.entries(S.prizes).map(([id,p]) => ({id, ...p}))
   .sort((a,b) => (a.order??0) - (b.order??0));
-const myChips   = () => chipsArr().filter(c => c.owner === S.uid);
+const myChips   = () => chipsArr().filter(c => c.owner === S.playerKey);
 const owedBy    = uid => chipsArr().filter(c=>c.owner===uid).reduce((s,c)=>s+c.value,0);
 const balanceOf = uid => owedBy(uid) - (S.players[uid]?.paid || 0);
 const drawnCount   = v   => chipsArr().filter(c=>c.value===v).length;
@@ -207,7 +209,7 @@ function startListeners(){
   });
   onSnapshot(collection(db,"players"), qs => {
     S.players = {}; qs.forEach(d => S.players[d.id] = d.data());
-    S.me = S.players[S.uid] || null;
+    S.me = S.playerKey ? (S.players[S.playerKey] || null) : null;
     S.ready.players = true; renderAll();
   });
   watchAlerts();
@@ -225,7 +227,7 @@ const allReady = () => Object.values(S.ready).every(Boolean);
 function maybeShow(){
   if (!allReady()) return;
   $("#screen-loading").classList.add("hidden");
-  if (!S.me){
+  if (!S.playerKey || !S.me){
     $("#screen-join").classList.remove("hidden");
     $("#app").classList.add("hidden");
   } else {
@@ -237,18 +239,37 @@ function maybeShow(){
 // ---------- join ----------
 $("#join-form").addEventListener("submit", e => { e.preventDefault(); $("#join-btn").click(); });
 $("#join-btn").addEventListener("click", async () => {
-  const name = $("#join-name").value.trim();
-  const e1 = $("#join-email").value.trim().toLowerCase();
-  const e2 = $("#join-email2").value.trim().toLowerCase();
   const err = $("#join-err");
   err.classList.add("hidden");
-  if (!name || !e1){ err.textContent = "Name and email are required."; err.classList.remove("hidden"); return; }
+  const e1 = $("#join-email").value.trim().toLowerCase();
+  if (!e1 || !e1.includes("@")){ err.textContent = "Enter your email."; err.classList.remove("hidden"); return; }
+  const key = emailKey(e1);
+  const existing = S.players[key];
+  if (existing){
+    S.playerKey = key;
+    toast(`Welcome back, ${existing.name}!`);
+    renderAll();
+    return;
+  }
+  // first-time: reveal name + confirm-email, require both
+  const newBox = $("#join-new");
+  if (newBox.classList.contains("hidden")){
+    newBox.classList.remove("hidden");
+    err.textContent = "New here — confirm your name and retype your email.";
+    err.classList.remove("hidden");
+    return;
+  }
+  const name = $("#join-name").value.trim();
+  const e2 = $("#join-email2").value.trim().toLowerCase();
+  if (!name){ err.textContent = "Name is required."; err.classList.remove("hidden"); return; }
   if (e1 !== e2){ err.textContent = "Emails don't match."; err.classList.remove("hidden"); return; }
   try{
-    await setDoc(doc(db,"players",S.uid), {
+    await setDoc(doc(db,"players",key), {
       name, email: e1, paid: 0, notices: [], createdAt: serverTimestamp()
     });
+    S.playerKey = key;
     audit("join", `${name} <${e1}>`);
+    renderAll();
   }catch(ex){ err.textContent = ex.message; err.classList.remove("hidden"); }
 });
 
@@ -300,7 +321,7 @@ function renderAll(){
 }
 
 function renderBalancePill(){
-  const bal = balanceOf(S.uid);
+  const bal = balanceOf(S.playerKey);
   const p = $("#balance-pill");
   p.textContent = bal > 0.005 ? `Owe ${money(bal)}` : "Paid up";
   p.classList.toggle("owe", bal > 0.005);
@@ -309,14 +330,14 @@ function renderBalancePill(){
 function renderBanners(){
   const B = [];
   const state = S.game?.state;
-  const myWins = prizesArr().filter(p => p.winnerChipId && S.chips[p.winnerChipId]?.owner === S.uid);
+  const myWins = prizesArr().filter(p => p.winnerChipId && S.chips[p.winnerChipId]?.owner === S.playerKey);
   if (myWins.length)
     B.push(`<div class="banner win"><div class="grow">🏆 <b>You won:</b> ${myWins.map(p=>esc(p.name)).join(", ")}. See the Prizes tab.</div></div>`);
   (S.me?.notices || []).forEach(n => {
     B.push(`<div class="banner info"><div class="grow">${esc(n.msg)}</div>
       <button class="x" data-dismiss="${esc(n.id)}">×</button></div>`);
   });
-  const bal = balanceOf(S.uid);
+  const bal = balanceOf(S.playerKey);
   if (bal > 0.005 && state !== "setup"){
     B.push(`<div class="banner warn"><div class="grow">You owe <b>${money(bal)}</b> for your chips.
       ${venmoBtns(bal)}</div></div>`);
@@ -349,7 +370,7 @@ $("#banners").addEventListener("click", async e => {
   const d = e.target.dataset;
   if (d.dismiss){
     const notices = (S.me.notices||[]).filter(n => n.id !== d.dismiss);
-    await updateDoc(doc(db,"players",S.uid), { notices }).catch(x=>toast(x.message));
+    await updateDoc(doc(db,"players",S.playerKey), { notices }).catch(x=>toast(x.message));
   }
   if (d.copy){ try{ await navigator.clipboard.writeText(d.copy); toast("Emails copied"); }catch{ toast("Copy failed"); } }
   if (d.resolve){ await updateDoc(doc(db,"adminAlerts",d.resolve), { resolved:true }).catch(x=>toast(x.message)); }
@@ -361,7 +382,7 @@ function renderChipsTab(){
   if (S.view !== "chips") return;
   const state = S.game?.state;
   const mine = myChips();
-  const owed = owedBy(S.uid), paid = S.me?.paid || 0;
+  const owed = owedBy(S.playerKey), paid = S.me?.paid || 0;
   const bag = bagRemaining();
 
   const cap = S.game?.unpaidCap || 0;
@@ -443,7 +464,7 @@ async function runDraw(){
 async function drawChipTx(){
   if (S.game?.state !== "open") throw new Error("Draws are closed.");
   const cap = S.game?.unpaidCap || 0;
-  if (cap > 0 && balanceOf(S.uid) >= cap)
+  if (cap > 0 && balanceOf(S.playerKey) >= cap)
     throw new Error(`Unpaid limit reached (${money(cap)}). Pay down your tab first.`);
   const chipRef = doc(collection(db,"chips"));
   let drawnValue = null;
@@ -464,7 +485,7 @@ async function drawChipTx(){
     drawnValue = groups[gi].value;
     tx.update(bagRef, { groups });
     tx.set(chipRef, {
-      owner: S.uid, ownerName: S.me.name, ownerEmail: S.me.email,
+      owner: S.playerKey, ownerName: S.me.name, ownerEmail: S.me.email,
       value: drawnValue, bucket: null, drawnAt: serverTimestamp()
     });
   });
@@ -662,9 +683,9 @@ function startWheel(ld){
       ctx.moveTo(0, 0);
       ctx.arc(0, 0, r - 6, i * slice, (i + 1) * slice);
       ctx.closePath();
-      ctx.fillStyle = `hsl(${ownerHue(c.owner)},52%,${c.owner===S.uid?46:60}%)`;
+      ctx.fillStyle = `hsl(${ownerHue(c.owner)},52%,${c.owner===S.playerKey?46:60}%)`;
       ctx.fill();
-      if (c.owner === S.uid){
+      if (c.owner === S.playerKey){
         ctx.lineWidth = 2; ctx.strokeStyle = "#FFC53D"; ctx.stroke();
       } else if (N <= 120){
         ctx.lineWidth = 1; ctx.strokeStyle = "rgba(255,255,255,.45)"; ctx.stroke();
