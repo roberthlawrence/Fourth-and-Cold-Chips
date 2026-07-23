@@ -346,8 +346,8 @@ function renderBanners(){
   if (myWins.length)
     B.push(`<div class="banner win"><div class="grow">🏆 <b>You won:</b> ${myWins.map(p=>esc(p.name)).join(", ")}. See the Prizes tab.</div></div>`);
   (S.me?.notices || []).forEach(n => {
-    B.push(`<div class="banner info"><div class="grow">${esc(n.msg)}</div>
-      <button class="x" data-dismiss="${esc(n.id)}">×</button></div>`);
+    B.push(`<div class="banner info"><div class="grow">${esc(n.msg)}<br>
+      <button class="btn mini" style="margin-top:6px" data-dismiss="${esc(n.id)}">Got it 👍</button></div></div>`);
   });
   const bal = balanceOf(S.playerKey);
   if (bal > 0.005 && state !== "setup"){
@@ -600,7 +600,7 @@ function renderLiveTab(){
     <div class="card center" style="margin-top:14px">
       <p class="eyebrow"><span class="livedot"></span> RAFFLE IS LIVE</p>
       <p class="small" style="margin-top:8px">Your color on the wheel:
-        <span class="swatch" style="background:hsl(${ownerHue(S.playerKey)},52%,46%)"></span>
+        <span class="swatch" style="background:#BF5700"></span> burnt orange
         — your slices also get a gold ring.</p>
       <p class="muted small" style="margin-top:6px">Keep this open — the wheel pops up automatically when each drawing starts.</p>
     </div>
@@ -622,7 +622,26 @@ const easeOutCubic = t => 1 - Math.pow(1 - t, 3);
 function ownerHue(uid){
   let h = 0;
   for (let i = 0; i < uid.length; i++) h = (h * 31 + uid.charCodeAt(i)) >>> 0;
-  return h % 360;
+  // keep other players off burnt-orange hues (those are yours)
+  return 45 + (h % 285);
+}
+function mulberry32(seed){
+  let a = seed >>> 0;
+  return () => {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+// Same seed on every phone -> same scattered wheel everywhere.
+function seededShuffle(arr, seed){
+  const a = [...arr], rnd = mulberry32(seed);
+  for (let i = a.length - 1; i > 0; i--){
+    const j = Math.floor(rnd() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
 }
 function handleLiveDraw(){
   const ld = S.liveDraw;
@@ -649,7 +668,7 @@ function startWheel(ld){
   $("#wheel-prize").textContent = ld.prizeName || "";
   $("#wheel-winner").classList.add("hidden");
   $("#wheel-winner").textContent = "";
-  const entries = bucketEntries(ld.prizeId);
+  const entries = seededShuffle(bucketEntries(ld.prizeId), (ld.startedAtMs || 1) % 2147483647);
   const N = entries.length;
   const winIdx = entries.findIndex(c => c.id === ld.winnerChipId);
   const cv = $("#wheel"), ctx = cv.getContext("2d");
@@ -657,7 +676,7 @@ function startWheel(ld){
   $("#wheel-status").textContent = `${N} chip${N===1?"":"s"} in — spinning…`;
   const myCount = entries.filter(c => c.owner === S.playerKey).length;
   $("#wheel-mycolor").innerHTML = myCount
-    ? `Your color: <span class="swatch" style="background:hsl(${ownerHue(S.playerKey)},52%,46%)"></span>
+    ? `Your color: <span class="swatch" style="background:#BF5700"></span> burnt orange
        — ${myCount} slice${myCount===1?"":"s"}, gold ring`
     : `<span class="muted">You have no chips on this prize.</span>`;
   if (!N || winIdx < 0){ showWheelResult(ld); return; }
@@ -676,7 +695,9 @@ function startWheel(ld){
       ctx.moveTo(0, 0);
       ctx.arc(0, 0, r - 6, i * slice, (i + 1) * slice);
       ctx.closePath();
-      ctx.fillStyle = `hsl(${ownerHue(c.owner)},52%,${c.owner===S.playerKey?46:60}%)`;
+      ctx.fillStyle = c.owner === S.playerKey
+        ? "#BF5700"
+        : `hsl(${ownerHue(c.owner)},52%,60%)`;
       ctx.fill();
       if (c.owner === S.playerKey){
         ctx.lineWidth = 2; ctx.strokeStyle = "#FFC53D"; ctx.stroke();
@@ -765,6 +786,17 @@ function renderAdminPanel(force){
   const allDrawn = ps.length && ps.every(p=>p.winnerChipId);
 
   const raffleLive = !!g.raffleLive;
+  const dashDrawn = chipsArr().length;
+  const dashRemaining = groups.reduce((s2,x)=>s2+x.remaining,0);
+  const dashDrawnVal = chipsArr().reduce((s2,c)=>s2+c.value,0);
+  const dashPaid = Object.values(S.players).reduce((s2,p)=>s2+(p.paid||0),0);
+  const dashboard = `
+    <div class="dash">
+      <div class="tile"><b class="num">${dashDrawn}</b><span>Chips drawn</span></div>
+      <div class="tile"><b class="num">${dashRemaining}</b><span>Chips remaining</span></div>
+      <div class="tile"><b class="num">${money(dashDrawnVal)}</b><span>Drawn value</span></div>
+      <div class="tile"><b class="num ${dashPaid>=dashDrawnVal-0.005?"okfig":"owefig"}">${money(dashPaid)}</b><span>Paid so far</span></div>
+    </div>`;
   const drawingSection = `
     <h2>Drawings</h2>
     ${state!=="locked" && state!=="complete"
@@ -818,13 +850,14 @@ function renderAdminPanel(force){
 
   if (!S.isPower){
     // payment admins: drawings + payments only
-    el.innerHTML = `<h2>Game state: <span style="color:var(--orange)">${state.toUpperCase()}</span></h2>`
+    el.innerHTML = dashboard
+      + `<h2>Game state: <span style="color:var(--orange)">${state.toUpperCase()}</span></h2>`
       + drawingSection + paymentsSection + footer;
     wireAdmin(el);
     return;
   }
 
-  el.innerHTML = `
+  el.innerHTML = dashboard + `
     <h2>Game state: <span style="color:var(--orange)">${state.toUpperCase()}</span></h2>
     <div class="card">
       <p class="muted small" style="margin-bottom:10px">Flow: <b>SETUP</b> (build bag + prizes) → <b>OPEN</b> (drawing &amp; placing) → <b>LOCKED</b> (run drawings) → <b>COMPLETE</b>. Buttons below move to the <i>next</i> step.</p>
@@ -954,12 +987,15 @@ function renderAdminPanel(force){
 function wireAdmin(el){
   el.querySelectorAll("input,select,textarea").forEach(i =>
     i.addEventListener("input", () => { S.adminDirty = true; }));
+  const KEEP_VIEW = ["loadaudit","loadpaylog","listarchives","permcheck","copyemail","csv","dlpaylog","backup"];
   el.querySelectorAll("[data-act]").forEach(b => b.addEventListener("click", async () => {
     try{ await adminAct(b.dataset.act); }
     catch(e){ toast((e.code === "permission-denied"
       ? "Permission denied — is your email in the firestore.rules list? "
       : "") + (e.code || e.message)); }
-    S.adminDirty = false; renderAdminPanel(true);
+    if (!KEEP_VIEW.includes(b.dataset.act)){
+      S.adminDirty = false; renderAdminPanel(true);
+    }
   }));
   el.querySelectorAll("[data-delprize]").forEach(b => b.addEventListener("click", () => removePrize(b.dataset.delprize)));
   el.querySelectorAll("[data-rmadmin]").forEach(b => b.addEventListener("click", async () => {
