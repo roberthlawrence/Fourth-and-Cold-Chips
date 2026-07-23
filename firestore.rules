@@ -2,26 +2,42 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    // ===== EDIT THESE TWO LISTS (lowercase gmail addresses) =====
-    // Keep them identical to POWER_ADMIN_EMAILS / PAYMENT_ADMIN_EMAILS
-    // in firebase-config.js. Use the exact address you sign in with.
+    // ================= BOOTSTRAP POWER ADMIN =================
+    // Put YOUR exact sign-in Gmail here (lowercase). This is the
+    // only email you ever have to hardcode — every other admin is
+    // added from the Admins section inside the app.
+    function bootstrapPower() {
+      return ["you@gmail.com"];
+    }
+    // =========================================================
+
+    function signedIn() { return request.auth != null; }
+    function myEmail() {
+      return request.auth.token.email != null
+        ? request.auth.token.email.lower() : "";
+    }
+    function adminDocExists() {
+      return exists(/databases/$(database)/documents/config/admins);
+    }
+    function adminDoc() {
+      return get(/databases/$(database)/documents/config/admins).data;
+    }
     function isPower() {
-      return request.auth != null && request.auth.token.email != null
-        && request.auth.token.email.lower() in [
-          "you@gmail.com"
-        ];
+      return signedIn() && (
+        myEmail() in bootstrapPower()
+        || (adminDocExists() && myEmail() in adminDoc().power)
+      );
     }
     function isPay() {
-      return request.auth != null && request.auth.token.email != null
-        && request.auth.token.email.lower() in [
-          "paymentadmin1@gmail.com"
-        ];
+      return signedIn() && adminDocExists() && myEmail() in adminDoc().payment;
     }
-    // ============================================================
     function isAdmin() { return isPower() || isPay(); }
-    function signedIn() { return request.auth != null; }
 
     match /config/game {
+      allow read: if signedIn();
+      allow write: if isPower();
+    }
+    match /config/admins {
       allow read: if signedIn();
       allow write: if isPower();
     }
@@ -32,7 +48,7 @@ service cloud.firestore {
     }
     match /config/liveDraw {
       allow read: if signedIn();
-      allow write: if isAdmin();             // payment admins can run drawings
+      allow write: if isAdmin();             // payment admins run drawings
     }
 
     match /players/{uid} {
@@ -66,11 +82,9 @@ service cloud.firestore {
     match /adminAlerts/{alertId} {
       allow read, write: if isAdmin();
     }
-
     match /archives/{archiveId} {
       allow read, write: if isPower();
     }
-
     match /audit/{entryId} {
       allow read: if isAdmin();
       allow create: if signedIn();

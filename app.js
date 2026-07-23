@@ -36,6 +36,7 @@ const S = {
   game: null, bag: null, me: null, liveDraw: null,
   players: {}, chips: {}, prizes: {}, alerts: {},
   ready: { game:false, bag:false, chips:false, prizes:false, players:false },
+  admins: { power: [], payment: [] },
   view: "chips", adminDirty: false, oddsOpen: false,
   unsubAlerts: null, wheelKey: null, wheelDismissed: null
 };
@@ -144,12 +145,17 @@ onAuthStateChanged(auth, user => {
   if (!user){ signInAnonymously(auth).catch(bootError); return; }
   S.uid = user.uid;
   S.email = (user.email || "").toLowerCase() || null;
-  S.isPower = !!S.email && POWER.includes(S.email);
-  S.isPay   = !!S.email && PAY.includes(S.email);
-  S.isAdmin = S.isPower || S.isPay;
+  computeRoles();
   if (S.email && !S.isAdmin) toast(`${S.email} isn't on the admin list.`);
   startListeners();
 });
+function computeRoles(){
+  const wasAdmin = S.isAdmin;
+  S.isPower = !!S.email && (POWER.includes(S.email) || S.admins.power.includes(S.email));
+  S.isPay   = !!S.email && (PAY.includes(S.email)   || S.admins.payment.includes(S.email));
+  S.isAdmin = S.isPower || S.isPay;
+  if (S.isAdmin !== wasAdmin) watchAlerts();
+}
 function bootError(e){
   $("#screen-loading").innerHTML =
     `<p class="err">Couldn't connect: ${esc(e.message)}</p>
@@ -176,6 +182,16 @@ function startListeners(){
   onSnapshot(doc(db,"config","bag"), snap => {
     S.bag = snap.exists() ? snap.data() : { groups: [] };
     S.ready.bag = true; renderAll();
+  });
+  onSnapshot(doc(db,"config","admins"), snap => {
+    if (snap.exists()){
+      const d = snap.data();
+      S.admins.power   = (d.power   || []).map(e=>String(e).toLowerCase());
+      S.admins.payment = (d.payment || []).map(e=>String(e).toLowerCase());
+    } else if (S.email && POWER.includes(S.email)){
+      setDoc(doc(db,"config","admins"), { power: [], payment: [] }).catch(()=>{});
+    }
+    computeRoles(); renderAll();
   });
   onSnapshot(doc(db,"config","liveDraw"), snap => {
     S.liveDraw = snap.exists() ? snap.data() : null;
@@ -804,7 +820,9 @@ function renderAdminPanel(force){
       <label>Unplaced chips when locking
         <select id="set-rule">
           <option value="warn" ${g.unassignedRule==="warn"?"selected":""}>Warn me and block the lock</option>
-          ${ps.map(p=>`<option value="${p.id}" ${g.unassignedRule===p.id?"selected":""}>Auto-move to: ${esc(p.name)}</option>`).join("")}
+          ${ps.length
+            ? ps.map(p=>`<option value="${p.id}" ${g.unassignedRule===p.id?"selected":""}>Auto-move to: ${esc(p.name)}</option>`).join("")
+            : `<option disabled>(add prizes below — each becomes an auto-move option)</option>`}
         </select></label>
       <p class="muted small" style="margin-top:-6px;margin-bottom:10px">This decides what happens to chips nobody placed when you hit Lock: either the lock is blocked so you can chase people down, or the chips auto-move into the prize you pick here. Add prizes and they'll show up as options.</p>
       <button class="btn block" data-act="savesettings">Save settings</button>
@@ -847,6 +865,31 @@ function renderAdminPanel(force){
     ${drawingSection}
     ${paymentsSection}
 
+    <h2>Admins</h2>
+    <div class="card">
+      <p class="muted small" style="margin-bottom:10px">Signed in as <b>${esc(S.email)}</b>
+        <button class="btn mini" data-act="copyemail">Copy</button> ·
+        <button class="btn mini" data-act="permcheck">Run permissions check</button></p>
+      <div id="perm-out"></div>
+      <h3 style="margin-top:8px">Power admins</h3>
+      <p class="muted small">Full control. Baked-in from firebase-config.js: ${POWER.map(esc).join(", ") || "(none)"}</p>
+      ${S.admins.power.map(e=>`<div class="place-row"><div class="grow small">${esc(e)}</div>
+        <button class="btn mini danger" data-rmadmin="power|${esc(e)}">✕</button></div>`).join("")}
+      <div class="row gap" style="margin-top:8px">
+        <input id="add-power" type="email" placeholder="name@gmail.com" style="flex:1">
+        <button class="btn mini" data-act="addpower">Add</button>
+      </div>
+      <h3 style="margin-top:16px">Payment admins</h3>
+      <p class="muted small">Payments + running drawings only. Baked-in: ${PAY.map(esc).join(", ") || "(none)"}</p>
+      ${S.admins.payment.map(e=>`<div class="place-row"><div class="grow small">${esc(e)}</div>
+        <button class="btn mini danger" data-rmadmin="payment|${esc(e)}">✕</button></div>`).join("")}
+      <div class="row gap" style="margin-top:8px">
+        <input id="add-payment" type="email" placeholder="name@gmail.com" style="flex:1">
+        <button class="btn mini" data-act="addpayment">Add</button>
+      </div>
+      <p class="muted small" style="margin-top:10px">Adds take effect immediately — the new admin just signs in with that Google account via the Admin button.</p>
+    </div>
+
     <h2>History &amp; archives</h2>
     <div class="card">
       <button class="btn mini" data-act="loadaudit">Load audit trail</button>
@@ -865,7 +908,7 @@ function renderAdminPanel(force){
         <input id="restore-file" type="file" accept=".json,application/json"></label>
       <button class="btn mini" data-act="restore">Restore from file</button>
       <div class="divider"></div>
-      <button class="btn danger block" data-act="cleargame">🧹 Clear game for a new run (auto-archives first)</button>
+      <button class="btn danger block" data-act="cleargame">🏈 New season reset — archive &amp; clear everything</button>
     </div>
     ${footer}
   `;
@@ -882,6 +925,15 @@ function wireAdmin(el){
     S.adminDirty = false; renderAdminPanel(true);
   }));
   el.querySelectorAll("[data-delprize]").forEach(b => b.addEventListener("click", () => removePrize(b.dataset.delprize)));
+  el.querySelectorAll("[data-rmadmin]").forEach(b => b.addEventListener("click", async () => {
+    const [tier, email] = b.dataset.rmadmin.split("|");
+    try{
+      const list = S.admins[tier].filter(e => e !== email);
+      await updateDoc(doc(db,"config","admins"), { [tier]: list });
+      audit("admins", `removed ${email} from ${tier}`);
+      S.adminDirty = false; renderAdminPanel(true);
+    }catch(e){ toast(e.code || e.message); }
+  }));
   el.querySelectorAll("[data-drawwin]").forEach(b => b.addEventListener("click",
     () => drawWinner(b.dataset.drawwin).catch(e=>toast(e.code||e.message))));
   el.querySelectorAll("[data-livedraw]").forEach(b => b.addEventListener("click",
@@ -970,6 +1022,46 @@ async function adminAct(act){
   if (act === "listarchives") await listArchives();
   if (act === "restore") await restoreFromFile();
   if (act === "cleargame") await clearGame();
+  if (act === "addpower" || act === "addpayment"){
+    const tier = act === "addpower" ? "power" : "payment";
+    const inp = $(act === "addpower" ? "#add-power" : "#add-payment");
+    const email = inp.value.trim().toLowerCase();
+    if (!email || !email.includes("@")){ toast("Enter a valid email."); return; }
+    await setDoc(doc(db,"config","admins"), {
+      power: tier==="power" ? [...new Set([...S.admins.power, email])] : S.admins.power,
+      payment: tier==="payment" ? [...new Set([...S.admins.payment, email])] : S.admins.payment
+    });
+    audit("admins", `added ${email} as ${tier} admin`);
+    toast(`${email} added as ${tier} admin`);
+  }
+  if (act === "copyemail"){
+    try{ await navigator.clipboard.writeText(S.email || ""); toast("Email copied — paste it into firestore.rules"); }
+    catch{ toast(S.email || ""); }
+  }
+  if (act === "permcheck") await permCheck();
+}
+
+async function permCheck(){
+  const out = $("#perm-out");
+  const results = [];
+  const tryIt = async (label, fn) => {
+    try{ await fn(); results.push(`✅ ${label}`); }
+    catch(e){ results.push(`❌ ${label} — ${e.code || e.message}`); }
+    out.innerHTML = results.map(r=>`<p class="small" style="margin:2px 0">${r}</p>`).join("");
+  };
+  out.innerHTML = `<p class="muted small">Testing as ${esc(S.email || "(not signed in with Google!)")}…</p>`;
+  await tryIt("Write game settings (power)", () =>
+    updateDoc(doc(db,"config","game"), { permCheck: serverTimestamp() }));
+  let testRef = null;
+  await tryIt("Create a prize (power)", async () => {
+    testRef = await addDoc(collection(db,"prizes"), { name:"__permtest__", desc:"", img:"",
+      order: 0, winnerChipId: null, createdAt: serverTimestamp() });
+  });
+  if (testRef) await tryIt("Delete the test prize (power)", () => deleteDoc(testRef));
+  await tryIt("Write live-draw doc (power or payment)", () =>
+    setDoc(doc(db,"config","liveDraw"), { status:"cleared" }));
+  results.push(`<span class="muted">Any ❌ with permission-denied means this exact email isn't in the matching list inside <b>firestore.rules</b> in the Firebase console (and that you pasted rules into the CHIP-DRAW project, not fourth-and-cold). Copy the email above, fix the list, Publish, re-test.</span>`);
+  out.innerHTML = results.map(r=>`<p class="small" style="margin:2px 0">${r}</p>`).join("");
 }
 
 async function lockGame(){
@@ -1195,7 +1287,7 @@ async function wipeCollections(){
   await deleteDoc(doc(db,"config","liveDraw")).catch(()=>{});
 }
 async function clearGame(){
-  const ok = await confirmDialog("Clear game for a new run?",
+  const ok = await confirmDialog("New season reset?",
     `<p class="small">This archives the current game first (cloud + file download), then wipes chips, prizes, players, and payments, empties the bag, and resets to SETUP.</p>`, "Archive & clear");
   if (!ok) return;
   downloadBackup();
