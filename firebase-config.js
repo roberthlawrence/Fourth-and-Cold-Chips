@@ -21,5 +21,5 @@ export const firebaseConfig = {
 
 // Google accounts allowed to use the Admin tab (lowercase).
 export const ADMIN_EMAILS = [
-  "you@gmail.com"
+  "roberthlawrence@gmail.com"
 ];
