@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#14231B">
+<title>Chip Draw Raffle</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Graduate&family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<!-- Loading -->
+<div id="screen-loading" class="screen center">
+  <div class="chip chip-load spin"><span>$</span></div>
+  <p class="muted">Shaking the bag…</p>
+</div>
+
+<!-- Join -->
+<div id="screen-join" class="screen center hidden">
+  <h1 class="brand" id="join-title">Chip Draw</h1>
+  <p class="tag">Pull a chip. Pay what it says. Every chip is one shot at a prize.</p>
+  <form id="join-form" class="card" autocomplete="on">
+    <label>Name<input id="join-name" required maxlength="40" placeholder="First Last"></label>
+    <label>Email<input id="join-email" type="email" required placeholder="you@example.com"></label>
+    <label>Confirm email<input id="join-email2" type="email" required placeholder="Type it again"></label>
+    <p id="join-err" class="err hidden"></p>
+    <button type="button" id="join-btn" class="btn primary">I'm in</button>
+  </form>
+</div>
+
+<!-- Main app -->
+<div id="app" class="hidden">
+  <header id="topbar">
+    <div class="brand small" id="app-title">Chip Draw</div>
+    <button id="balance-pill" class="pill" title="Your balance">$0</button>
+  </header>
+
+  <div id="banners"></div>
+
+  <main>
+    <section id="tab-chips" class="tab"></section>
+    <section id="tab-prizes" class="tab hidden"></section>
+    <section id="tab-bag" class="tab hidden"></section>
+    <section id="tab-admin" class="tab hidden"></section>
+  </main>
+
+  <nav id="tabbar">
+    <button data-tab="chips" class="active">My Chips</button>
+    <button data-tab="prizes">Prizes</button>
+    <button data-tab="bag">The Bag</button>
+    <button data-tab="admin" id="tabbtn-admin" class="hidden">Admin</button>
+  </nav>
+</div>
+
+<!-- Draw modal -->
+<div id="modal-draw" class="modal hidden">
+  <div class="modal-body center">
+    <div id="draw-stage">
+      <div id="draw-bag">🎒</div>
+      <div id="draw-chip" class="chip big hidden"><span></span></div>
+    </div>
+    <p id="draw-text">Reaching in…</p>
+    <div id="draw-actions" class="hidden">
+      <button class="btn primary" id="draw-again">Draw another</button>
+      <button class="btn ghost" id="draw-done">Done</button>
+    </div>
+  </div>
+</div>
+
+<!-- Place / move chips sheet -->
+<div id="modal-place" class="modal hidden">
+  <div class="modal-body">
+    <h3 id="place-title">Place chips</h3>
+    <div id="place-content"></div>
+    <div class="row gap">
+      <button class="btn ghost" id="place-cancel">Cancel</button>
+      <button class="btn primary" id="place-confirm">Confirm</button>
+    </div>
+  </div>
+</div>
+
+<!-- Generic confirm -->
+<div id="modal-confirm" class="modal hidden">
+  <div class="modal-body">
+    <h3 id="confirm-title"></h3>
+    <div id="confirm-text"></div>
+    <div class="row gap">
+      <button class="btn ghost" id="confirm-no">Cancel</button>
+      <button class="btn danger" id="confirm-yes">Confirm</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast" class="hidden"></div>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>
