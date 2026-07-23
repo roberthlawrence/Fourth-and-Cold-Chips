@@ -1,15 +1,15 @@
 // ============================================================
-// CHIP DRAW — app.js  (vanilla ES modules + Firebase v10)
+// 4TH & COLD — CHIP DRAW · app.js (vanilla ES modules + Firebase v10)
 // ============================================================
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
 import {
   getAuth, onAuthStateChanged, signInAnonymously,
-  GoogleAuthProvider, signInWithPopup, signOut
+  GoogleAuthProvider, signInWithPopup, signInWithRedirect,
+  getRedirectResult, signOut
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
 import {
-  getFirestore, doc, collection, onSnapshot, getDoc, setDoc, updateDoc,
-  addDoc, deleteDoc, runTransaction, writeBatch, serverTimestamp,
-  arrayUnion
+  getFirestore, doc, collection, onSnapshot, setDoc, updateDoc,
+  addDoc, runTransaction, writeBatch, serverTimestamp, arrayUnion
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { firebaseConfig, ADMIN_EMAILS } from "./firebase-config.js";
 
@@ -17,17 +17,20 @@ const app  = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db   = getFirestore(app);
 
+// Same collectors as the squares board
+const VENMO = [
+  { label: "Pay Marcus", handle: "marcus-dawes"  },
+  { label: "Pay Dan",    handle: "dan-huskerson" },
+  { label: "Pay Randyn", handle: "randyn-tenery" }
+];
+
 // ---------- state ----------
 const S = {
   uid: null, email: null, isAdmin: false,
   game: null, bag: null, me: null,
-  players: {},          // uid -> player
-  chips: {},            // id -> chip
-  prizes: {},           // id -> prize
-  alerts: {},           // id -> adminAlert
+  players: {}, chips: {}, prizes: {}, alerts: {},
   ready: { game:false, bag:false, chips:false, prizes:false, players:false },
-  activeTab: "chips",
-  unsubAlerts: null
+  view: "chips", adminDirty: false, unsubAlerts: null
 };
 
 // ---------- helpers ----------
@@ -37,7 +40,7 @@ const money = n => "$" + (Math.round(n * 100) / 100).toLocaleString();
 const esc = s => String(s ?? "").replace(/[&<>"']/g,
   c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 
-function cryptoRandInt(n){ // uniform 0..n-1
+function cryptoRandInt(n){
   if (n <= 0) throw new Error("empty");
   const max = Math.floor(0xFFFFFFFF / n) * n;
   const a = new Uint32Array(1);
@@ -49,47 +52,46 @@ const CHIP_COLORS = [
   { c:"#EDE6D6", dark:false }, { c:"#B23A32", dark:true },
   { c:"#2E5E9E", dark:true },  { c:"#2F7D4F", dark:true },
   { c:"#3A3A3C", dark:true },  { c:"#6C3FA0", dark:true },
-  { c:"#D2A24C", dark:false }, { c:"#C25A0B", dark:true }
+  { c:"#FFC53D", dark:false }, { c:"#BF5700", dark:true }
 ];
+const bagValues = () => (S.bag?.groups || []).map(g => g.value).sort((a,b)=>a-b);
 function chipStyle(value){
-  const vals = bagValues();
-  const i = Math.max(0, vals.indexOf(value)) % CHIP_COLORS.length;
+  const i = Math.max(0, bagValues().indexOf(value)) % CHIP_COLORS.length;
   return CHIP_COLORS[i];
-}
-function bagValues(){
-  return (S.bag?.groups || []).map(g => g.value).sort((a,b)=>a-b);
 }
 function chipHTML(value, size=""){
   const st = chipStyle(value);
-  return `<div class="chip ${size} ${st.dark?"dark":""}" style="--c:${st.c}">
-    <span>$${value}</span></div>`;
+  return `<div class="chip ${size} ${st.dark?"dark":""}" style="--c:${st.c}"><span>$${value}</span></div>`;
 }
 
 let toastT = null;
 function toast(msg){
   const t = $("#toast"); t.textContent = msg; t.classList.remove("hidden");
-  clearTimeout(toastT); toastT = setTimeout(()=>t.classList.add("hidden"), 2600);
+  clearTimeout(toastT); toastT = setTimeout(()=>t.classList.add("hidden"), 3200);
 }
-
-function confirmDialog(title, html){
+function confirmDialog(title, html, yesLabel){
   return new Promise(res => {
     $("#confirm-title").textContent = title;
     $("#confirm-text").innerHTML = html;
-    const m = $("#modal-confirm"); m.classList.remove("hidden");
-    const done = ok => { m.classList.add("hidden"); yes.removeEventListener("click",oy);
-      no.removeEventListener("click",on); res(ok); };
     const yes = $("#confirm-yes"), no = $("#confirm-no");
+    yes.textContent = yesLabel || "Confirm";
+    const m = $("#modal-confirm"); m.classList.remove("hidden");
+    const done = ok => { m.classList.add("hidden");
+      yes.removeEventListener("click",oy); no.removeEventListener("click",on); res(ok); };
     const oy = () => done(true), on = () => done(false);
     yes.addEventListener("click", oy); no.addEventListener("click", on);
   });
 }
-
 function audit(action, detail){
-  addDoc(collection(db,"audit"), {
-    at: serverTimestamp(),
-    who: S.email || S.me?.name || S.uid || "?",
-    action, detail: detail || ""
-  }).catch(()=>{});
+  addDoc(collection(db,"audit"), { at: serverTimestamp(),
+    who: S.email || S.me?.name || S.uid || "?", action, detail: detail || "" }).catch(()=>{});
+}
+function venmoBtns(amount){
+  const note = encodeURIComponent(S.game?.title || "4th & Cold Chip Draw");
+  return `<div class="venmoBtns">` + VENMO.map(v =>
+    `<a class="btn primary mini" target="_blank" rel="noopener"
+      href="https://venmo.com/${v.handle}?txn=pay&amount=${amount.toFixed(2)}&note=${note}">${v.label}</a>`
+  ).join("") + `</div>`;
 }
 
 // derived
@@ -97,20 +99,44 @@ const chipsArr  = () => Object.entries(S.chips).map(([id,c]) => ({id, ...c}));
 const prizesArr = () => Object.entries(S.prizes).map(([id,p]) => ({id, ...p}))
   .sort((a,b) => (a.order??0) - (b.order??0));
 const myChips   = () => chipsArr().filter(c => c.owner === S.uid);
-function owedBy(uid){ return chipsArr().filter(c => c.owner===uid)
-  .reduce((s,c)=>s+c.value, 0); }
-function balanceOf(uid){ return owedBy(uid) - (S.players[uid]?.paid || 0); }
-function drawnCount(value){ return chipsArr().filter(c=>c.value===value).length; }
-function bucketCount(pid){ return chipsArr().filter(c=>c.bucket===pid).length; }
-function myBucketCount(pid){ return myChips().filter(c=>c.bucket===pid).length; }
-function anyUnpaid(){ return Object.keys(S.players).some(u => balanceOf(u) > 0.005); }
+const owedBy    = uid => chipsArr().filter(c=>c.owner===uid).reduce((s,c)=>s+c.value,0);
+const balanceOf = uid => owedBy(uid) - (S.players[uid]?.paid || 0);
+const drawnCount   = v   => chipsArr().filter(c=>c.value===v).length;
+const bucketCount  = pid => chipsArr().filter(c=>c.bucket===pid).length;
+const myBucketCount= pid => myChips().filter(c=>c.bucket===pid).length;
+const anyUnpaid = () => Object.keys(S.players).some(u => balanceOf(u) > 0.005);
+function bagRemaining(){
+  const gs = [...(S.bag?.groups||[])].filter(g=>g.remaining>0).sort((a,b)=>a.value-b.value);
+  const total = gs.reduce((s,g)=>s+g.remaining,0);
+  return { groups: gs, total,
+    min: gs.length ? gs[0].value : 0, max: gs.length ? gs[gs.length-1].value : 0 };
+}
+function bagInfoHTML(withOdds){
+  const b = bagRemaining();
+  if (!b.total) return `<b>The bag is empty.</b>`;
+  const range = b.min === b.max ? money(b.min) : `${money(b.min)}–${money(b.max)}`;
+  let html = `<b>${b.total}</b> chip${b.total===1?"":"s"} left in the bag · ${range} still out there`;
+  if (withOdds){
+    html += `<details class="bagodds"><summary>What are my odds?</summary>` +
+      b.groups.map(g => `
+        <div class="bag-row">
+          ${chipHTML(g.value,"mini")}
+          <div class="bag-bar"><i style="width:${(g.remaining/b.total*100).toFixed(1)}%"></i></div>
+          <div class="bag-nums"><b>${g.remaining}</b> left · ${(g.remaining/b.total*100).toFixed(0)}%</div>
+        </div>`).join("") + `</details>`;
+  }
+  return html;
+}
 
 // ---------- boot / auth ----------
-onAuthStateChanged(auth, async user => {
-  if (!user){ signInAnonymously(auth).catch(e => bootError(e)); return; }
+getRedirectResult(auth).catch(e => toast("Sign-in failed: " + (e.code || e.message)));
+onAuthStateChanged(auth, user => {
+  if (!user){ signInAnonymously(auth).catch(bootError); return; }
   S.uid = user.uid;
   S.email = (user.email || "").toLowerCase() || null;
   S.isAdmin = !!S.email && ADMIN_EMAILS.map(e=>e.toLowerCase()).includes(S.email);
+  if (S.email && !S.isAdmin)
+    toast(`${S.email} isn't on the admin list.`);
   startListeners();
 });
 function bootError(e){
@@ -121,20 +147,19 @@ function bootError(e){
 
 let started = false;
 function startListeners(){
-  if (started){ maybeShow(); return; }
+  if (started){ watchAlerts(); renderAll(); return; }
   started = true;
   onSnapshot(doc(db,"config","game"), async snap => {
     if (!snap.exists()){
       if (S.isAdmin){
         await setDoc(doc(db,"config","game"), { title:"Chip Draw Raffle",
-          state:"setup", unassignedRule:"warn", unpaidCap:0, venmo:"",
-          unpaidAtLock:false });
+          state:"setup", unassignedRule:"warn", unpaidCap:0, unpaidAtLock:false });
         return;
       }
       S.game = null;
     } else S.game = snap.data();
     S.ready.game = true; renderAll();
-  }, e => bootError(e));
+  }, bootError);
   onSnapshot(doc(db,"config","bag"), snap => {
     S.bag = snap.exists() ? snap.data() : { groups: [] };
     S.ready.bag = true; renderAll();
@@ -156,21 +181,20 @@ function startListeners(){
 }
 function watchAlerts(){
   if (S.unsubAlerts){ S.unsubAlerts(); S.unsubAlerts = null; }
-  if (!S.isAdmin) { S.alerts = {}; return; }
+  if (!S.isAdmin){ S.alerts = {}; return; }
   S.unsubAlerts = onSnapshot(collection(db,"adminAlerts"), qs => {
     S.alerts = {}; qs.forEach(d => S.alerts[d.id] = d.data());
     renderAll();
   });
 }
 
-function allReady(){ return Object.values(S.ready).every(Boolean); }
+const allReady = () => Object.values(S.ready).every(Boolean);
 function maybeShow(){
   if (!allReady()) return;
   $("#screen-loading").classList.add("hidden");
   if (!S.me){
     $("#screen-join").classList.remove("hidden");
     $("#app").classList.add("hidden");
-    $("#join-title").textContent = S.game?.title || "Chip Draw";
   } else {
     $("#screen-join").classList.add("hidden");
     $("#app").classList.remove("hidden");
@@ -195,25 +219,53 @@ $("#join-btn").addEventListener("click", async () => {
   }catch(ex){ err.textContent = ex.message; err.classList.remove("hidden"); }
 });
 
-// ---------- tabs ----------
-$$("#tabbar button").forEach(b => b.addEventListener("click", () => {
-  S.activeTab = b.dataset.tab;
-  $$("#tabbar button").forEach(x => x.classList.toggle("active", x===b));
-  $$(".tab").forEach(t => t.classList.add("hidden"));
-  $("#tab-" + S.activeTab).classList.remove("hidden");
+// ---------- view switching ----------
+$$("#seg button").forEach(b => b.addEventListener("click", () => setView(b.dataset.view)));
+function setView(v){
+  S.view = v;
+  $$("#seg button").forEach(x => x.classList.toggle("active", x.dataset.view === v));
+  $("#seg").classList.toggle("hidden", v === "admin");
+  $("#tab-chips").classList.toggle("hidden", v !== "chips");
+  $("#tab-prizes").classList.toggle("hidden", v !== "prizes");
+  $("#panel-admin").classList.toggle("hidden", v !== "admin");
+  $("#adminBtn").textContent = v === "admin" ? "Exit admin" : "Admin";
   renderAll();
-}));
+}
+
+// Admin button (top-right, like the squares board)
+$("#adminBtn").addEventListener("click", async () => {
+  if (S.view === "admin"){ setView("chips"); return; }
+  if (S.isAdmin){ setView("admin"); return; }
+  const ok = await confirmDialog("Admin sign-in",
+    `<p class="small">Admins only. This signs you in with Google — if you've been playing on this device, your chips stay tied to the account you drew them with.</p>`,
+    "Sign in with Google");
+  if (!ok) return;
+  try{
+    await signInWithPopup(auth, new GoogleAuthProvider());
+    location.reload();
+  }catch(e){
+    if (["auth/popup-blocked","auth/popup-closed-by-user","auth/cancelled-popup-request",
+         "auth/operation-not-supported-in-this-environment"].includes(e.code)){
+      try{ await signInWithRedirect(auth, new GoogleAuthProvider()); }
+      catch(e2){ toast("Sign-in failed: " + (e2.code || e2.message)); }
+    } else {
+      toast("Sign-in failed: " + (e.code || e.message));
+    }
+  }
+});
 
 // ---------- render ----------
 function renderAll(){
   if (!allReady()) return;
   maybeShow();
   if (!S.me) return;
-  $("#app-title").textContent = S.game?.title || "Chip Draw";
+  $("#brandSeason").textContent = (S.game?.title || "CHIP DRAW").toUpperCase();
   renderBalancePill(); renderBanners();
-  renderChipsTab(); renderPrizesTab(); renderBagTab();
-  $("#tabbtn-admin").classList.toggle("hidden", !S.isAdmin);
-  if (S.isAdmin) renderAdminTab();
+  renderChipsTab(); renderPrizesTab();
+  $("#adminBtn").classList.remove("hidden");
+  if (S.view === "admin"){
+    if (S.isAdmin) renderAdminPanel(); else setView("chips");
+  }
 }
 
 function renderBalancePill(){
@@ -223,37 +275,25 @@ function renderBalancePill(){
   p.classList.toggle("owe", bal > 0.005);
 }
 
-function venmoLink(amount){
-  const h = S.game?.venmo;
-  if (!h) return null;
-  return `https://venmo.com/${encodeURIComponent(h)}?txn=pay&amount=${amount.toFixed(2)}&note=${encodeURIComponent((S.game?.title||"Chip Draw"))}`;
-}
-
 function renderBanners(){
   const B = [];
   const state = S.game?.state;
-  // winners (mine)
   const myWins = prizesArr().filter(p => p.winnerChipId && S.chips[p.winnerChipId]?.owner === S.uid);
   if (myWins.length)
     B.push(`<div class="banner win"><div class="grow">🏆 <b>You won:</b> ${myWins.map(p=>esc(p.name)).join(", ")}. See the Prizes tab.</div></div>`);
-  // player notices
   (S.me?.notices || []).forEach(n => {
     B.push(`<div class="banner info"><div class="grow">${esc(n.msg)}</div>
       <button class="x" data-dismiss="${esc(n.id)}">×</button></div>`);
   });
-  // balance due (every login while owed)
   const bal = balanceOf(S.uid);
   if (bal > 0.005 && state !== "setup"){
-    const v = venmoLink(bal);
     B.push(`<div class="banner warn"><div class="grow">You owe <b>${money(bal)}</b> for your chips.
-      ${v ? `<br><a class="btn primary mini" href="${v}" target="_blank" rel="noopener">Pay with Venmo</a>` : ""}</div></div>`);
+      ${venmoBtns(bal)}</div></div>`);
   }
-  // unallocated reminder
   const un = myChips().filter(c => !c.bucket).length;
   if (un > 0 && state === "open"){
-    B.push(`<div class="banner info"><div class="grow">You have <b>${un}</b> chip${un>1?"s":""} not placed on a prize yet. Head to the Prizes tab.</div></div>`);
+    B.push(`<div class="banner info"><div class="grow">You have <b>${un}</b> chip${un>1?"s":""} not placed on a prize yet — hit the Prizes tab.</div></div>`);
   }
-  // admin banners
   if (S.isAdmin){
     if ((state === "locked" || state === "complete") && anyUnpaid()){
       const list = Object.keys(S.players).filter(u => balanceOf(u) > 0.005)
@@ -261,7 +301,7 @@ function renderBanners(){
       B.push(`<div class="banner alert"><div class="grow"><b>Admin — unpaid balances after lock:</b> ${list}</div></div>`);
     }
     if (S.game?.unpaidAtLock && (state === "locked" || state === "complete")){
-      B.push(`<div class="banner warn"><div class="grow"><b>Admin:</b> game was locked with unpaid chips still counted as valid entries (per settings).</div></div>`);
+      B.push(`<div class="banner warn"><div class="grow"><b>Admin:</b> game locked with unpaid chips still counted as valid entries (per settings).</div></div>`);
     }
     Object.entries(S.alerts).filter(([,a]) => !a.resolved).forEach(([id,a]) => {
       const emails = (a.impacted||[]).map(x=>x.email).join(", ");
@@ -284,23 +324,23 @@ $("#banners").addEventListener("click", async e => {
   if (d.resolve){ await updateDoc(doc(db,"adminAlerts",d.resolve), { resolved:true }); }
 });
 
-// ---------- MY CHIPS tab ----------
+// ---------- MY CHIPS ----------
 function renderChipsTab(){
   const el = $("#tab-chips");
+  if (S.view !== "chips") return;
   const state = S.game?.state;
   const mine = myChips();
   const owed = owedBy(S.uid), paid = S.me?.paid || 0;
-  const remaining = (S.bag?.groups||[]).reduce((s,g)=>s+g.remaining,0);
+  const bag = bagRemaining();
 
   const cap = S.game?.unpaidCap || 0;
   const capped = cap > 0 && (owed - paid) >= cap;
   let drawDisabled = "", drawNote = "";
   if (state === "setup"){ drawDisabled="disabled"; drawNote="The game hasn't opened yet."; }
   else if (state !== "open"){ drawDisabled="disabled"; drawNote="Buckets are locked — no more draws."; }
-  else if (!remaining){ drawDisabled="disabled"; drawNote="The bag is empty!"; }
+  else if (!bag.total){ drawDisabled="disabled"; drawNote="The bag is empty!"; }
   else if (capped){ drawDisabled="disabled"; drawNote=`Pay down your balance to keep drawing (limit ${money(cap)} unpaid).`; }
 
-  // group my chips by value+bucket
   const groups = {};
   mine.forEach(c => {
     const k = c.value + "|" + (c.bucket||"");
@@ -318,9 +358,9 @@ function renderChipsTab(){
 
   el.innerHTML = `
     <div class="card center">
-      <span class="eyebrow">The bag holds ${remaining} chip${remaining===1?"":"s"}</span>
-      <button id="btn-draw" class="btn primary block" style="margin-top:12px" ${drawDisabled}>🎒 Draw a chip</button>
+      <button id="btn-draw" class="btn primary block" ${drawDisabled}>🎒 Draw a chip</button>
       ${drawNote ? `<p class="muted small" style="margin-top:8px">${drawNote}</p>` : ""}
+      <div class="baginfo">${bagInfoHTML(true)}</div>
     </div>
     <h2>Your chips (${mine.length})</h2>
     ${mine.length ? rows : `<p class="muted">No chips yet — pull one from the bag.</p>`}
@@ -331,9 +371,10 @@ function renderChipsTab(){
       <div class="row spread"><span>Paid</span><b class="num">${money(paid)}</b></div>
       <div class="row spread"><span>Balance</span>
         <b class="num ${owed-paid>0.005?"owefig":"okfig"}">${money(owed-paid)}</b></div>
-      <p class="muted small" style="margin-top:8px">Every chip = one entry in whatever prize you place it on. The dollar value is what you pay — it doesn't change your odds.</p>
+      ${owed-paid>0.005 ? venmoBtns(owed-paid) : ""}
+      <p class="muted small" style="margin-top:10px">Every chip = one entry on whatever prize you place it. The dollar value is what you pay — it doesn't change your odds.</p>
     </div>`;
-  $("#btn-draw")?.addEventListener("click", () => openDraw());
+  $("#btn-draw")?.addEventListener("click", openDraw);
   el.querySelectorAll("[data-move]").forEach(b => b.addEventListener("click", () => {
     const [v, bucket] = b.dataset.move.split("|");
     openMoveSheet(Number(v), bucket || null);
@@ -341,17 +382,14 @@ function renderChipsTab(){
 }
 
 // ---------- draw ----------
-function openDraw(){
-  $("#modal-draw").classList.remove("hidden");
-  runDraw();
-}
+function openDraw(){ $("#modal-draw").classList.remove("hidden"); runDraw(); }
 async function runDraw(){
   const bagEl = $("#draw-bag"), chipEl = $("#draw-chip"),
-        txt = $("#draw-text"), actions = $("#draw-actions");
+        txt = $("#draw-text"), actions = $("#draw-actions"), info = $("#draw-baginfo");
   actions.classList.add("hidden"); chipEl.classList.add("hidden");
   bagEl.classList.remove("hidden");
   bagEl.classList.remove("shake"); void bagEl.offsetWidth; bagEl.classList.add("shake");
-  txt.textContent = "Reaching in…";
+  txt.textContent = "Reaching in…"; info.innerHTML = "";
   try{
     const value = await drawChipTx();
     await new Promise(r => setTimeout(r, 900));
@@ -362,6 +400,7 @@ async function runDraw(){
     chipEl.querySelector("span").textContent = "$" + value;
     chipEl.classList.remove("hidden");
     txt.innerHTML = `You pulled a <b>${money(value)}</b> chip!`;
+    info.innerHTML = bagInfoHTML(false);
     audit("draw", `${S.me.name} drew $${value}`);
   }catch(ex){
     txt.textContent = ex.message === "empty" ? "The bag is empty!" : ("Draw failed: " + ex.message);
@@ -369,7 +408,6 @@ async function runDraw(){
   actions.classList.remove("hidden");
 }
 async function drawChipTx(){
-  // pre-checks
   if (S.game?.state !== "open") throw new Error("Draws are closed.");
   const cap = S.game?.unpaidCap || 0;
   if (cap > 0 && balanceOf(S.uid) >= cap)
@@ -399,12 +437,13 @@ async function drawChipTx(){
   });
   return drawnValue;
 }
-$("#draw-again").addEventListener("click", () => runDraw());
+$("#draw-again").addEventListener("click", runDraw);
 $("#draw-done").addEventListener("click", () => $("#modal-draw").classList.add("hidden"));
 
-// ---------- PRIZES tab ----------
+// ---------- PRIZES ----------
 function renderPrizesTab(){
   const el = $("#tab-prizes");
+  if (S.view !== "prizes") return;
   const state = S.game?.state;
   const ps = prizesArr();
   if (!ps.length){ el.innerHTML = `<p class="muted" style="margin-top:20px">No prizes posted yet.</p>`; return; }
@@ -419,7 +458,7 @@ function renderPrizesTab(){
       return `<div class="prize ${won?"won":""}">
         ${p.img ? `<img src="${p.img}" alt="${esc(p.name)}">` : ""}
         <div class="pad">
-          <div class="row spread"><h3 style="margin:0">${esc(p.name)}</h3></div>
+          <h3 style="margin:0">${esc(p.name)}</h3>
           ${p.desc ? `<p class="muted small" style="margin-top:4px">${esc(p.desc)}</p>` : ""}
           <div class="counts"><span><b class="num">${total}</b> chip${total===1?"":"s"} in</span>
             <span>yours: <b class="num">${mine}</b></span></div>
@@ -467,8 +506,6 @@ function stepperVals(){
   $$("#place-content .stepper").forEach(st => out[st.dataset.key] = Number(st.querySelector(".val").textContent));
   return out;
 }
-
-// add unallocated chips to a prize (per denomination)
 function openPlaceSheet(pid){
   const p = S.prizes[pid]; if (!p) return;
   const free = myChips().filter(c => !c.bucket);
@@ -491,7 +528,6 @@ function openPlaceSheet(pid){
   });
   wireSteppers();
 }
-// pull my chips out of a prize back to unallocated
 function openPullSheet(pid){
   const p = S.prizes[pid]; if (!p) return;
   const mine = myChips().filter(c => c.bucket === pid);
@@ -514,7 +550,6 @@ function openPullSheet(pid){
   });
   wireSteppers();
 }
-// move a group (from My Chips tab) to any destination
 function openMoveSheet(value, fromBucket){
   const mine = myChips().filter(c => c.value===value && (c.bucket||null)===(fromBucket||null));
   const opts = [`<option value="">— Not placed —</option>`]
@@ -537,59 +572,26 @@ function openMoveSheet(value, fromBucket){
   wireSteppers();
 }
 
-// ---------- BAG tab ----------
-function renderBagTab(){
-  const el = $("#tab-bag");
-  const groups = [...(S.bag?.groups||[])].sort((a,b)=>a.value-b.value);
-  const remaining = groups.reduce((s,g)=>s+g.remaining,0);
-  const total = groups.reduce((s,g)=>s+g.total,0);
-  el.innerHTML = `
-    <h2>What's left in the bag</h2>
-    <div class="card">
-      ${groups.length ? groups.map(g => `
-        <div class="bag-row">
-          ${chipHTML(g.value,"mini")}
-          <div class="bag-bar"><i style="width:${g.total? (g.remaining/g.total*100):0}%"></i></div>
-          <div class="bag-nums num"><b>${g.remaining}</b> / ${g.total}</div>
-        </div>`).join("") : `<p class="muted">The bag hasn't been filled yet.</p>`}
-      ${groups.length ? `<div class="bb-total row spread"><span>Chips remaining</span><b class="num">${remaining} / ${total}</b></div>` : ""}
-    </div>
-    <p class="muted small">Every chip is one entry — the dollar amount is only what it costs. Odds of pulling each value shift as the bag empties.</p>
-    <div class="divider"></div>
-    ${S.email
-      ? `<p class="small muted">Signed in as ${esc(S.email)} <button class="btn mini" id="btn-signout">Sign out</button></p>`
-      : `<button class="btn mini ghost" id="btn-adminlogin">Admin sign-in</button>`}
-  `;
-  $("#btn-adminlogin")?.addEventListener("click", adminLogin);
-  $("#btn-signout")?.addEventListener("click", async () => { await signOut(auth); location.reload(); });
-}
-async function adminLogin(){
-  try{
-    await signInWithPopup(auth, new GoogleAuthProvider());
-    location.reload();
-  }catch(e){ toast("Sign-in failed: " + e.message); }
-}
-
-// ---------- ADMIN tab ----------
+// ---------- ADMIN PANEL ----------
 function adminEditing(){
   const a = document.activeElement;
-  return a && $("#tab-admin")?.contains(a) &&
+  return a && $("#panel-admin")?.contains(a) &&
     ["INPUT","SELECT","TEXTAREA"].includes(a.tagName);
 }
-function renderAdminTab(force){
-  const el = $("#tab-admin");
-  if (!force && (adminEditing() || S.adminDirty)) return; // don't clobber unsaved edits
+function renderAdminPanel(force){
+  const el = $("#panel-admin");
+  if (!force && (adminEditing() || S.adminDirty)) return;
   const g = S.game || {};
   const groups = [...(S.bag?.groups||[])];
   const ps = prizesArr();
-  const state = g.state;
+  const state = g.state || "setup";
   const totChips = groups.reduce((s,x)=>s+x.total,0);
   const totVal = groups.reduce((s,x)=>s+x.total*x.value,0);
   const unallocAll = chipsArr().filter(c=>!c.bucket).length;
   const allDrawn = ps.length && ps.every(p=>p.winnerChipId);
 
   el.innerHTML = `
-    <h2>Game state: <span style="color:var(--orange-hi)">${state.toUpperCase()}</span></h2>
+    <h2>Game state: <span style="color:var(--orange)">${state.toUpperCase()}</span></h2>
     <div class="card">
       ${state==="setup" ? `<button class="btn primary block" data-act="open">Open the game</button>
         <p class="muted small" style="margin-top:8px">Players can join now, but can't draw until you open.</p>` : ""}
@@ -598,14 +600,13 @@ function renderAdminTab(force){
         Rule on lock: <b>${g.unassignedRule==="warn" ? "warn me (blocks lock)" : "auto-move to " + esc(S.prizes[g.unassignedRule]?.name || "?")}</b></p>` : ""}
       ${state==="locked" ? `
         <button class="btn block" data-act="reopen">Reopen (unlock)</button>
-        ${allDrawn ? `<button class="btn primary block" style="margin-top:8px" data-act="complete">Mark game complete</button>` : ""}` : ""}
+        ${allDrawn ? `<button class="btn gold block" style="margin-top:8px" data-act="complete">Mark game complete</button>` : ""}` : ""}
       ${state==="complete" ? `<p class="muted">Game complete. 🏁</p>` : ""}
     </div>
 
     <h2>Settings</h2>
     <div class="card">
       <label>Game title<input id="set-title" value="${esc(g.title||"")}"></label>
-      <label>Venmo handle (no @)<input id="set-venmo" value="${esc(g.venmo||"")}" placeholder="your-venmo"></label>
       <label>Unpaid limit — block draws once a player owes this much ($0 = off)
         <input id="set-cap" type="number" min="0" step="1" value="${g.unpaidCap||0}"></label>
       <label>Unplaced chips when locking
@@ -638,11 +639,11 @@ function renderAdminTab(force){
     ${ps.map(p=>`<div class="card">
       <div class="row spread"><b>${esc(p.name)}</b>
         <span class="muted small num">${bucketCount(p.id)} chips</span></div>
-      ${p.winnerChipId ? `<p class="winline small" style="color:var(--gold)">🏆 ${esc(S.chips[p.winnerChipId]?.ownerName||"?")} — $${S.chips[p.winnerChipId]?.value??"?"} chip</p>`
-        : (state==="locked" ? `<button class="btn mini primary" style="margin-top:8px" data-drawwin="${p.id}">Draw winner</button>` : "")}
+      ${p.winnerChipId ? `<p class="winline small" style="color:var(--orange-deep);font-weight:700;margin-top:6px">🏆 ${esc(S.chips[p.winnerChipId]?.ownerName||"?")} — $${S.chips[p.winnerChipId]?.value??"?"} chip</p>`
+        : (state==="locked" ? `<button class="btn mini gold" style="margin-top:8px" data-drawwin="${p.id}">Draw winner</button>` : "")}
       ${state!=="complete" && !p.winnerChipId ? `<button class="btn mini danger" style="margin-top:8px" data-delprize="${p.id}">Remove prize</button>` : ""}
     </div>`).join("")}
-    ${state==="locked" && ps.some(p=>!p.winnerChipId) ? `<button class="btn primary block" data-act="drawall">Draw all remaining winners</button>` : ""}
+    ${state==="locked" && ps.some(p=>!p.winnerChipId) ? `<button class="btn gold block" data-act="drawall">Draw all remaining winners</button>` : ""}
     ${ps.length < 30 ? `
     <div class="card">
       <h3>Add a prize</h3>
@@ -668,15 +669,16 @@ function renderAdminTab(force){
       <button class="btn mini" style="margin-top:10px" data-act="savepays">Save payment edits</button>
       <button class="btn mini" data-act="csv">Download CSV</button>
     </div>
-    <p class="muted small" style="margin:8px 0 30px">Tip: if you (an admin) are also playing, draw your chips while signed in with Google so your chips stay tied to this account.</p>
+    <p class="muted small" style="margin:8px 0 4px">Signed in as ${esc(S.email)} ·
+      <button class="btn mini ghost" data-act="signout">Sign out</button></p>
+    <p class="muted small" style="margin:0 0 30px">If you're playing too, draw your chips while signed in with Google so they stay tied to this account.</p>
   `;
 
-  // wire admin actions
   el.querySelectorAll("input,select,textarea").forEach(i =>
     i.addEventListener("input", () => { S.adminDirty = true; }));
   el.querySelectorAll("[data-act]").forEach(b => b.addEventListener("click", async () => {
     await adminAct(b.dataset.act);
-    S.adminDirty = false; renderAdminTab(true);
+    S.adminDirty = false; renderAdminPanel(true);
   }));
   el.querySelectorAll("[data-delprize]").forEach(b => b.addEventListener("click", () => removePrize(b.dataset.delprize)));
   el.querySelectorAll("[data-drawwin]").forEach(b => b.addEventListener("click", () => drawWinner(b.dataset.drawwin)));
@@ -708,11 +710,10 @@ async function adminAct(act){
   if (act === "savesettings"){
     await updateDoc(gRef, {
       title: $("#set-title").value.trim() || "Chip Draw Raffle",
-      venmo: $("#set-venmo").value.trim(),
       unpaidCap: Number($("#set-cap").value) || 0,
       unassignedRule: $("#set-rule").value
     });
-    toast("Settings saved"); audit("settings","updated"); renderAdminTab();
+    toast("Settings saved"); audit("settings","updated");
   }
   if (act === "savebag"){
     const rows = $$("#bag-builder .bb-row");
@@ -727,13 +728,11 @@ async function adminAct(act){
       if (total < drawn){ toast(`$${value}: can't set below ${drawn} already drawn.`); return; }
       groups.push({ value, total, remaining: total - drawn });
     }
-    // any denomination with drawn chips must remain
     for (const v of new Set(chipsArr().map(c=>c.value))){
       if (!seen.has(v)){ toast(`$${v} chips have been drawn — that row can't be removed.`); return; }
     }
     await setDoc(doc(db,"config","bag"), { groups });
-    toast("Bag saved"); audit("bag", JSON.stringify(groups.map(g=>`${g.total}x$${g.value}`)));
-    renderAdminTab();
+    toast("Bag saved"); audit("bag", groups.map(g=>`${g.total}x$${g.value}`).join(", "));
   }
   if (act === "open"){
     if (!(S.bag?.groups||[]).length){ toast("Fill the bag first."); return; }
@@ -760,6 +759,7 @@ async function adminAct(act){
     await batch.commit(); toast("Payments saved"); audit("payment","bulk edit");
   }
   if (act === "csv") downloadCSV();
+  if (act === "signout"){ await signOut(auth); location.reload(); }
 }
 
 async function lockGame(){
@@ -770,7 +770,7 @@ async function lockGame(){
       const owners = [...new Set(un.map(c=>c.ownerName))].join(", ");
       await confirmDialog("Can't lock yet",
         `<p class="small">${un.length} chip${un.length>1?"s":""} still unplaced (${esc(owners)}).</p>
-         <p class="small muted">Have players place them, or set an auto-move bucket in Settings, then lock again.</p>`);
+         <p class="small muted">Have players place them, or set an auto-move bucket in Settings, then lock again.</p>`, "OK");
       return;
     }
     const batch = writeBatch(db);
@@ -784,7 +784,6 @@ async function lockGame(){
   toast("Buckets locked");
 }
 
-// prize image → resized base64
 function readImage(file){
   return new Promise((res, rej) => {
     if (!file) return res("");
@@ -814,10 +813,9 @@ async function addPrize(){
       name, desc: $("#np-desc").value.trim(), img,
       order: Date.now(), winnerChipId: null, createdAt: serverTimestamp()
     });
-    audit("prize", `added: ${name}`); toast("Prize added"); renderAdminTab();
+    audit("prize", `added: ${name}`); toast("Prize added");
   }catch(e){ toast(e.message); }
 }
-
 async function removePrize(pid){
   const p = S.prizes[pid]; if (!p) return;
   const affected = chipsArr().filter(c => c.bucket === pid);
@@ -849,7 +847,6 @@ async function removePrize(pid){
   audit("prize", `removed: ${p.name} (${affected.length} chips returned)`);
   toast("Prize removed");
 }
-
 async function drawWinner(pid, quiet){
   const p = S.prizes[pid]; if (!p || p.winnerChipId) return;
   const entries = chipsArr().filter(c => c.bucket === pid);
@@ -862,13 +859,11 @@ async function drawWinner(pid, quiet){
   audit("winner", `${p.name} → ${win.ownerName} ($${win.value} chip, ${entries.length} entries)`);
   if (!quiet) toast(`🏆 ${win.ownerName} wins ${p.name}!`);
 }
-
 function downloadCSV(){
   const rows = [["Player","Email","Chip value","Prize bucket","Owed","Paid","Balance"]];
   chipsArr().forEach(c => rows.push([
     c.ownerName, c.ownerEmail, c.value,
-    c.bucket ? (S.prizes[c.bucket]?.name || "removed") : "unplaced",
-    "", "", ""
+    c.bucket ? (S.prizes[c.bucket]?.name || "removed") : "unplaced", "", "", ""
   ]));
   Object.entries(S.players).forEach(([u,pl]) => rows.push([
     pl.name, pl.email, "", "TOTALS", owedBy(u), pl.paid||0, balanceOf(u)
@@ -878,8 +873,7 @@ function downloadCSV(){
   a.href = URL.createObjectURL(new Blob([csv], {type:"text/csv"}));
   a.download = "chip-draw.csv"; a.click();
 }
-
-// re-render admin tab when inputs blur (since we skip renders mid-edit)
 document.addEventListener("focusout", () => {
-  if (S.isAdmin) setTimeout(() => { if (!adminEditing()) renderAdminTab(); }, 150);
+  if (S.isAdmin && S.view === "admin")
+    setTimeout(() => { if (!adminEditing()) renderAdminPanel(); }, 150);
 });
