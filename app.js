@@ -142,6 +142,14 @@ function eligibleEntries(pid, p){
   return entries;
 }
 const perkOf = v => ((S.bag?.groups || []).find(g => g.value === v)?.perk || "");
+const chipPerk = c => (c.perk !== undefined ? (c.perk || "") : perkOf(c.value));
+// drawn count for a specific bag row (rows can share a price, e.g. $5 Mulligan + $5 String)
+function drawnFor(groups, idx){
+  const g = groups[idx];
+  const firstOfValue = groups.findIndex(x => x.value === g.value) === idx;
+  return chipsArr().filter(c => c.gid ? c.gid === g.gid
+    : (firstOfValue && c.value === g.value)).length;
+}
 function bagRemaining(){
   const gs = [...(S.bag?.groups||[])].filter(g=>g.remaining>0).sort((a,b)=>a.value-b.value);
   const total = gs.reduce((s,g)=>s+g.remaining,0);
@@ -429,13 +437,14 @@ function renderChipsTab(){
 
   const groups = {};
   mine.forEach(c => {
-    const k = c.value + "|" + (c.bucket||"");
-    groups[k] = groups[k] || { value:c.value, bucket:c.bucket||null, n:0 };
+    const pk = chipPerk(c);
+    const k = c.value + "|" + pk + "|" + (c.bucket||"");
+    groups[k] = groups[k] || { value:c.value, perk:pk, bucket:c.bucket||null, n:0 };
     groups[k].n++;
   });
   const rows = Object.values(groups).sort((a,b)=>a.value-b.value).map(g => {
     const where = g.bucket ? (S.prizes[g.bucket]?.name || "Removed prize") : "Not placed";
-    const perk = perkOf(g.value);
+    const perk = g.perk;
     return `<div class="place-row">
       <div class="stack-item">${chipHTML(g.value,"mini")}<span class="stack-count">×${g.n}</span></div>
       <div class="grow small">${perk?`<span class="perkTag">${esc(perk)}</span> `:""}${esc(where)}</div>
@@ -523,7 +532,8 @@ async function drawChipTx(){
     tx.update(bagRef, { groups });
     tx.set(chipRef, {
       owner: S.playerKey, ownerName: S.me.name, ownerEmail: S.me.email,
-      value: drawnValue.value, bucket: null, drawnAt: serverTimestamp()
+      value: drawnValue.value, perk: drawnValue.perk, gid: groups[gi].gid || null,
+      bucket: null, drawnAt: serverTimestamp()
     });
   });
   return drawnValue;
@@ -949,8 +959,8 @@ function renderAdminPanel(force){
     <div class="card" id="bag-builder">
       <p class="muted small" style="margin-bottom:10px">One row per denomination. You can add chips mid-game; you can't cut a denomination below what's already been drawn. <b>Perk</b> is optional (e.g. Mulligan, String extension) — if set, players see it when they pull that chip.</p>
       ${groups.map((x,i)=>{
-        const d = drawnCount(x.value);
-        return `<div class="bb-row" data-i="${i}">
+        const d = drawnFor(groups, i);
+        return `<div class="bb-row" data-i="${i}" data-gid="${esc(x.gid||"")}">
           <input type="number" class="bb-val num" min="1" step="1" value="${x.value}" placeholder="$" ${d? "disabled":""}>
           <span class="muted">×</span>
           <input type="number" class="bb-count num" min="${d}" step="1" value="${x.total}" placeholder="#">
@@ -1147,23 +1157,57 @@ async function adminAct(act){
   }
   if (act === "savebag"){
     const rows = $$("#bag-builder .bb-row");
-    const groups = []; const seen = new Set();
+    const groups = [];
     for (const r of rows){
       const value = Number(r.querySelector(".bb-val").value);
       const total = Number(r.querySelector(".bb-count").value);
       if (!value || value < 1 || total < 0 || !Number.isFinite(total)) continue;
-      if (seen.has(value)){ toast(`Duplicate $${value} rows — combine them.`); return; }
-      seen.add(value);
-      const drawn = drawnCount(value);
-      if (total < drawn){ toast(`$${value}: can't set below ${drawn} already drawn.`); return; }
-      groups.push({ value, total, remaining: total - drawn,
-        perk: (r.querySelector(".bb-perk")?.value || "").trim() });
+      groups.push({
+        gid: r.dataset.gid || ("g" + Date.now().toString(36) + Math.random().toString(36).slice(2,7)),
+        value, total, remaining: 0,
+        perk: (r.querySelector(".bb-perk")?.value || "").trim()
+      });
     }
-    for (const v of new Set(chipsArr().map(c=>c.value))){
-      if (!seen.has(v)){ toast(`$${v} chips have been drawn — that row can't be removed.`); return; }
+    for (let i = 0; i < groups.length; i++){
+      const g = groups[i], drawn = drawnFor(groups, i);
+      if (g.total < drawn){
+        toast(`$${g.value}${g.perk?` (${g.perk})`:""}: can't set below ${drawn} already drawn.`);
+        return;
+      }
+      g.remaining = g.total - drawn;
+    }
+    // rows with drawn chips can't be deleted
+    for (const gid of new Set(chipsArr().map(c=>c.gid).filter(Boolean))){
+      if (!groups.some(g => g.gid === gid)){
+        toast("A row with drawn chips can't be removed."); return;
+      }
+    }
+    for (const v of new Set(chipsArr().filter(c=>!c.gid).map(c=>c.value))){
+      if (!groups.some(g => g.value === v)){
+        toast(`$${v} chips have been drawn — keep a $${v} row.`); return;
+      }
+    }
+    // soft heads-up: identical rows (same price AND same perk) are probably a typo
+    const tally = {};
+    groups.forEach(g => {
+      const k = g.value + "|" + (g.perk || "").toLowerCase();
+      tally[k] = (tally[k] || 0) + 1;
+    });
+    const dupes = Object.entries(tally).filter(([,n]) => n > 1)
+      .map(([k,n]) => {
+        const [v, pk] = k.split("|");
+        return `${n} rows of $${v}${pk ? " (" + esc(pk) + ")" : ""}`;
+      });
+    if (dupes.length){
+      const ok = await confirmDialog("Heads up — identical rows",
+        `<p class="small">The bag has ${dupes.join(" and ")}. Different perks at the same price are fine, but identical rows are usually a typo — the chips would all look the same.</p>
+         <p class="muted small">Save anyway, or cancel and combine them.</p>`,
+        "Save anyway");
+      if (!ok) return;
     }
     await setDoc(doc(db,"config","bag"), { groups });
-    toast("Bag saved"); audit("bag", groups.map(g=>`${g.total}x$${g.value}`).join(", "));
+    toast("Bag saved");
+    audit("bag", groups.map(g=>`${g.total}x$${g.value}${g.perk?"("+g.perk+")":""}`).join(", "));
   }
   if (act === "open"){
     if (!(S.bag?.groups||[]).length){ toast("Fill the bag first."); return; }
@@ -1437,7 +1481,8 @@ async function releaseChips(key){
   await batch.commit();
   const groups = (S.bag?.groups || []).map(x => ({ ...x }));
   theirs.forEach(c => {
-    const gi = groups.findIndex(x => x.value === c.value);
+    let gi = c.gid ? groups.findIndex(x => x.gid === c.gid) : -1;
+    if (gi < 0) gi = groups.findIndex(x => x.value === c.value);
     if (gi >= 0) groups[gi].remaining += 1;
   });
   await setDoc(doc(db,"config","bag"), { groups });
