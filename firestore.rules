@@ -86,7 +86,7 @@ service cloud.firestore {
       // payment admins may only record drawing results
       allow update: if isPower()
         || (isPay() && request.resource.data.diff(resource.data).affectedKeys()
-              .hasOnly(['winnerChipId','winnerName','winnerEmail','winnerValue','drawnAt']));
+              .hasOnly(['winners','winnerChipId','winnerName','winnerEmail','winnerValue','drawnAt']));
     }
 
     match /payments/{paymentId} {

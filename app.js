@@ -124,6 +124,24 @@ const myBucketCount= pid => myChips().filter(c=>c.bucket===pid).length;
 const anyUnpaid = () => Object.keys(S.players).some(u => balanceOf(u) > 0.005);
 const bucketEntries = pid => chipsArr().filter(c => c.bucket === pid)
   .sort((a,b) => a.id < b.id ? -1 : 1);   // deterministic order on every device
+// multi-winner prizes: winners array with legacy single-winner fallback
+const effWinners = p => (p.winners && p.winners.length) ? p.winners
+  : (p.winnerChipId ? [{ chipId: p.winnerChipId, owner: S.chips[p.winnerChipId]?.owner || "",
+      name: p.winnerName || S.chips[p.winnerChipId]?.ownerName || "?",
+      email: p.winnerEmail || "", value: p.winnerValue ?? 0, at: 0 }] : []);
+const numW = p => Math.max(1, p.numWinners || 1);
+const prizeDone = p => effWinners(p).length >= numW(p);
+function eligibleEntries(pid, p){
+  let entries = bucketEntries(pid);
+  const already = effWinners(p).map(w => w.chipId);
+  entries = entries.filter(c => !already.includes(c.id));
+  if (p.uniqueWinners){
+    const owners = effWinners(p).map(w => w.owner);
+    entries = entries.filter(c => !owners.includes(c.owner));
+  }
+  return entries;
+}
+const perkOf = v => ((S.bag?.groups || []).find(g => g.value === v)?.perk || "");
 function bagRemaining(){
   const gs = [...(S.bag?.groups||[])].filter(g=>g.remaining>0).sort((a,b)=>a.value-b.value);
   const total = gs.reduce((s,g)=>s+g.remaining,0);
@@ -139,7 +157,7 @@ function bagInfoHTML(withOdds){
     html += `<details class="bagodds" ${S.oddsOpen?"open":""}><summary>What are my odds?</summary>` +
       b.groups.map(g => `
         <div class="bag-row">
-          ${chipHTML(g.value,"mini")}
+          ${chipHTML(g.value,"mini")}${g.perk?`<span class="perkTag">${esc(g.perk)}</span>`:""}
           <div class="bag-bar"><i style="width:${(g.remaining/b.total*100).toFixed(1)}%"></i></div>
           <div class="bag-nums"><b>${g.remaining}</b> left · ${(g.remaining/b.total*100).toFixed(0)}%</div>
         </div>`).join("") +
@@ -342,9 +360,13 @@ function renderBalancePill(){
 function renderBanners(){
   const B = [];
   const state = S.game?.state;
-  const myWins = prizesArr().filter(p => p.winnerChipId && S.chips[p.winnerChipId]?.owner === S.playerKey);
+  const myWins = prizesArr().map(p => {
+    const n = effWinners(p).filter(w => w.owner === S.playerKey
+      || (w.chipId && S.chips[w.chipId]?.owner === S.playerKey)).length;
+    return n ? (esc(p.name) + (n > 1 ? ` ×${n}` : "")) : null;
+  }).filter(Boolean);
   if (myWins.length)
-    B.push(`<div class="banner win"><div class="grow">🏆 <b>You won:</b> ${myWins.map(p=>esc(p.name)).join(", ")}. See the Prizes tab.</div></div>`);
+    B.push(`<div class="banner win"><div class="grow">🏆 <b>You won:</b> ${myWins.join(", ")}. See the Prizes tab.</div></div>`);
   (S.me?.notices || []).forEach(n => {
     B.push(`<div class="banner info"><div class="grow">${esc(n.msg)}<br>
       <button class="btn mini" style="margin-top:6px" data-dismiss="${esc(n.id)}">Got it 👍</button></div></div>`);
@@ -413,9 +435,10 @@ function renderChipsTab(){
   });
   const rows = Object.values(groups).sort((a,b)=>a.value-b.value).map(g => {
     const where = g.bucket ? (S.prizes[g.bucket]?.name || "Removed prize") : "Not placed";
+    const perk = perkOf(g.value);
     return `<div class="place-row">
       <div class="stack-item">${chipHTML(g.value,"mini")}<span class="stack-count">×${g.n}</span></div>
-      <div class="grow small">${esc(where)}</div>
+      <div class="grow small">${perk?`<span class="perkTag">${esc(perk)}</span> `:""}${esc(where)}</div>
     </div>`;
   }).join("");
 
@@ -454,7 +477,8 @@ async function runDraw(){
   $("#draw-total").innerHTML = "";
   try{
     const minShake = new Promise(r => setTimeout(r, 650));
-    const value = await drawChipTx();
+    const drawn = await drawChipTx();
+    const value = drawn.value;
     await minShake;
     bagEl.classList.add("hidden");
     const st = chipStyle(value);
@@ -462,12 +486,13 @@ async function runDraw(){
     chipEl.style.setProperty("--c", st.c);
     chipEl.querySelector("span").textContent = "$" + value;
     chipEl.classList.remove("hidden");
-    txt.innerHTML = `You pulled a <b>${money(value)}</b> chip!`;
+    txt.innerHTML = `You pulled a <b>${money(value)}</b> chip!`
+      + (drawn.perk ? `<br><span class="perkLine">🏌️ Good for: <b>${esc(drawn.perk)}</b></span>` : "");
     const n = myChips().length, owedNow = owedBy(S.playerKey);
     $("#draw-total").innerHTML =
       `Your stack: <b>${n}</b> chip${n===1?"":"s"} · total owed <b>${money(owedNow)}</b>`;
     info.innerHTML = bagInfoHTML(false);
-    audit("draw", `${S.me.name} drew $${value}`);
+    audit("draw", `${S.me.name} drew $${value}${drawn.perk ? " ("+drawn.perk+")" : ""}`);
   }catch(ex){
     txt.textContent = ex.message === "empty" ? "The bag is empty!" : ("Draw failed: " + ex.message);
   }
@@ -494,11 +519,11 @@ async function drawChipTx(){
       idx -= groups[gi].remaining;
     }
     groups[gi] = { ...groups[gi], remaining: groups[gi].remaining - 1 };
-    drawnValue = groups[gi].value;
+    drawnValue = { value: groups[gi].value, perk: groups[gi].perk || "" };
     tx.update(bagRef, { groups });
     tx.set(chipRef, {
       owner: S.playerKey, ownerName: S.me.name, ownerEmail: S.me.email,
-      value: drawnValue, bucket: null, drawnAt: serverTimestamp()
+      value: drawnValue.value, bucket: null, drawnAt: serverTimestamp()
     });
   });
   return drawnValue;
@@ -519,16 +544,17 @@ function renderPrizesTab(){
     ${state==="locked" ? `<div class="banner info"><div class="grow">Buckets are <b>locked</b>. Watch for live drawings — the wheel pops up right here when one starts.</div></div>` : ""}
     ${ps.map(p => {
       const total = bucketCount(p.id), mine = myBucketCount(p.id);
-      const won = !!p.winnerChipId;
-      const winChip = won ? S.chips[p.winnerChipId] : null;
+      const wins = effWinners(p);
+      const won = prizeDone(p);
       return `<div class="prize ${won?"won":""}">
         ${p.img ? `<img src="${p.img}" alt="${esc(p.name)}">` : ""}
         <div class="pad">
           <h3 style="margin:0">${esc(p.name)}</h3>
           ${p.desc ? `<p class="muted small" style="margin-top:4px">${esc(p.desc)}</p>` : ""}
           <div class="counts"><span><b class="num">${total}</b> chip${total===1?"":"s"} in</span>
-            <span>yours: <b class="num">${mine}</b></span></div>
-          ${won ? `<div class="winline">🏆 Winner: ${esc(winChip?.ownerName || p.winnerName || "?")}</div>` : ""}
+            <span>yours: <b class="num">${mine}</b></span>
+            ${numW(p)>1 ? `<span>winners: <b class="num">${wins.length}/${numW(p)}</b></span>` : ""}</div>
+          ${wins.length ? `<div class="winline">${wins.map((w,i)=>`🏆 ${esc(w.name||"?")}${numW(p)>1?` <span class="muted small">(#${i+1})</span>`:""}`).join("<br>")}</div>` : ""}
           ${state==="open" ? `<div class="btnrow">
               <button class="btn mini primary" data-upd="${p.id}">Update chips${mine?` (${mine} here)`:""}</button>
             </div>` : ""}
@@ -593,9 +619,12 @@ function renderLiveTab(){
   const el = $("#tab-live");
   if (S.view !== "live") return;
   const ps = prizesArr();
-  const done = ps.filter(p => p.winnerChipId)
-    .sort((a,b) => (a.drawnAt?.seconds||0) - (b.drawnAt?.seconds||0));
-  const pending = ps.filter(p => !p.winnerChipId);
+  const rowsOut = [];
+  ps.forEach(p => effWinners(p).forEach((w,i) =>
+    rowsOut.push({ prize: p.name, tag: numW(p)>1 ? ` #${i+1}` : "", name: w.name, at: w.at||0 })));
+  rowsOut.sort((a,b) => a.at - b.at);
+  const totalSlots = ps.reduce((s2,p)=>s2+numW(p),0);
+  const pendingSlots = totalSlots - rowsOut.length;
   el.innerHTML = `
     <div class="card center" style="margin-top:14px">
       <p class="eyebrow"><span class="livedot"></span> RAFFLE IS LIVE</p>
@@ -604,13 +633,13 @@ function renderLiveTab(){
         — your slices also get a gold ring.</p>
       <p class="muted small" style="margin-top:6px">Keep this open — the wheel pops up automatically when each drawing starts.</p>
     </div>
-    <h2>Results (${done.length}/${ps.length})</h2>
+    <h2>Results (${rowsOut.length}/${totalSlots})</h2>
     <div class="card results">
-      ${done.length ? done.map(p => `<div class="place-row">
-          <div class="grow small"><b>${esc(p.name)}</b></div>
-          <div class="small">🏆 ${esc(p.winnerName || "?")}</div></div>`).join("")
+      ${rowsOut.length ? rowsOut.map(r => `<div class="place-row">
+          <div class="grow small"><b>${esc(r.prize)}${esc(r.tag)}</b></div>
+          <div class="small">🏆 ${esc(r.name || "?")}</div></div>`).join("")
         : `<p class="muted small">No winners drawn yet.</p>`}
-      ${pending.length ? `<p class="muted small" style="margin-top:8px">${pending.length} prize${pending.length===1?"":"s"} still to draw.</p>` : ""}
+      ${pendingSlots ? `<p class="muted small" style="margin-top:8px">${pendingSlots} drawing${pendingSlots===1?"":"s"} still to run.</p>` : ""}
     </div>`;
 }
 
@@ -665,10 +694,12 @@ function handleLiveDraw(){
 }
 function startWheel(ld){
   stopWheel();
-  $("#wheel-prize").textContent = ld.prizeName || "";
+  $("#wheel-prize").textContent = (ld.prizeName || "")
+    + (ld.of > 1 ? ` — winner ${ld.round} of ${ld.of}` : "");
   $("#wheel-winner").classList.add("hidden");
   $("#wheel-winner").textContent = "";
-  const entries = seededShuffle(bucketEntries(ld.prizeId), (ld.startedAtMs || 1) % 2147483647);
+  const base = bucketEntries(ld.prizeId).filter(c => !(ld.excluded || []).includes(c.id));
+  const entries = seededShuffle(base, (ld.startedAtMs || 1) % 2147483647);
   const N = entries.length;
   const winIdx = entries.findIndex(c => c.id === ld.winnerChipId);
   const cv = $("#wheel"), ctx = cv.getContext("2d");
@@ -735,33 +766,46 @@ $("#wheel-close").addEventListener("click", () => {
   stopWheel();
 });
 async function startLiveDraw(pid){
-  const p = S.prizes[pid]; if (!p || p.winnerChipId) return;
-  const entries = bucketEntries(pid);
-  if (!entries.length){ toast("No chips in that bucket."); return; }
+  const p = S.prizes[pid]; if (!p || prizeDone(p)) return;
+  const entries = eligibleEntries(pid, p);
+  if (!entries.length){
+    toast(p.uniqueWinners && bucketCount(pid)
+      ? "No eligible chips left — everyone remaining already won this prize."
+      : "No chips in that bucket.");
+    return;
+  }
   const win = entries[cryptoRandInt(entries.length)];
+  const excluded = bucketEntries(pid).filter(c => !entries.some(e => e.id === c.id)).map(c => c.id);
   const D = 10000;
   await setDoc(doc(db,"config","liveDraw"), {
     prizeId: pid, prizeName: p.name,
     winnerChipId: win.id, winnerName: win.ownerName,
+    round: effWinners(p).length + 1, of: numW(p), excluded,
     startedAtMs: Date.now(), durationMs: D, status: "spinning"
   });
-  audit("live-draw", `${p.name} — wheel started (${entries.length} entries)`);
+  audit("live-draw", `${p.name} — wheel started (round ${effWinners(p).length + 1}/${numW(p)}, ${entries.length} eligible)`);
   setTimeout(() => finalizeLive({ prizeId: pid, winnerChipId: win.id,
     winnerName: win.ownerName, winnerEmail: win.ownerEmail, winnerValue: win.value }), D + 600);
 }
 async function finalizeLive(ld){
   try{
     const p = S.prizes[ld.prizeId];
-    if (p && !p.winnerChipId){
+    if (p && !effWinners(p).some(w => w.chipId === ld.winnerChipId) && !prizeDone(p)){
       const chip = S.chips[ld.winnerChipId] || {};
+      const winners = [...effWinners(p), {
+        chipId: ld.winnerChipId, owner: chip.owner || "",
+        name: ld.winnerName || chip.ownerName || "?",
+        email: ld.winnerEmail || chip.ownerEmail || "",
+        value: ld.winnerValue ?? chip.value ?? 0, at: Date.now() }];
       await updateDoc(doc(db,"prizes",ld.prizeId), {
+        winners,
         winnerChipId: ld.winnerChipId,
         winnerName: ld.winnerName || chip.ownerName || "?",
         winnerEmail: ld.winnerEmail || chip.ownerEmail || "",
         winnerValue: ld.winnerValue ?? chip.value ?? 0,
         drawnAt: serverTimestamp()
       });
-      audit("winner", `${p.name} → ${ld.winnerName || chip.ownerName} (live wheel)`);
+      audit("winner", `${p.name} → ${ld.winnerName || chip.ownerName} (live wheel, winner ${winners.length}/${numW(p)})`);
     }
     await updateDoc(doc(db,"config","liveDraw"), { status: "done" }).catch(()=>{});
   }catch(e){ toast("Finalize failed: " + (e.code || e.message)); }
@@ -783,7 +827,7 @@ function renderAdminPanel(force){
   const totChips = groups.reduce((s,x)=>s+x.total,0);
   const totVal = groups.reduce((s,x)=>s+x.total*x.value,0);
   const unallocAll = chipsArr().filter(c=>!c.bucket).length;
-  const allDrawn = ps.length && ps.every(p=>p.winnerChipId);
+  const allDrawn = ps.length && ps.every(p=>prizeDone(p));
 
   const raffleLive = !!g.raffleLive;
   const dashDrawn = chipsArr().length;
@@ -805,16 +849,19 @@ function renderAdminPanel(force){
           <button class="btn primary block" data-act="startraffle">🔴 Start raffle</button>
           <p class="muted small" style="margin-top:8px">Resolves any unplaced chips (you'll see who), then opens the Live tab on every player's phone. Wheels can spin after this.</p>
         </div>` : `<div class="banner win"><div class="grow">🔴 <b>Raffle is live.</b> Run each prize below — everyone sees the wheel.</div></div>`)
-      + ps.map(p=>`<div class="card">
-          <div class="row spread"><b>${esc(p.name)}</b>
+      + ps.map(p=>{
+          const wins = effWinners(p), nw = numW(p), done = prizeDone(p);
+          const winsHtml = wins.length
+            ? `<p class="small" style="color:var(--orange-deep);font-weight:700;margin-top:6px">${wins.map((w,i)=>`🏆 ${esc(w.name||"?")}${nw>1?` <span class="muted">(#${i+1})</span>`:""}`).join("<br>")}</p>` : "";
+          return `<div class="card">
+          <div class="row spread"><b>${esc(p.name)}${nw>1?` <span class="muted small num">(${wins.length}/${nw} drawn)</span>`:""}</b>
             <span class="muted small num">${bucketCount(p.id)} chips</span></div>
-          ${p.winnerChipId
-            ? `<p class="small" style="color:var(--orange-deep);font-weight:700;margin-top:6px">🏆 ${esc(p.winnerName||S.chips[p.winnerChipId]?.ownerName||"?")}</p>`
-            : `<div class="row gap">
-                <button class="btn mini gold" data-livedraw="${p.id}" ${raffleLive?"":"disabled"}>🎡 Live wheel draw</button>
-                <button class="btn mini" data-drawwin="${p.id}">Quick draw (no wheel)</button>
+          ${winsHtml}
+          ${done ? "" : `<div class="row gap">
+                <button class="btn mini gold" data-livedraw="${p.id}" ${raffleLive?"":"disabled"}>🎡 Live wheel${nw>1?` — winner ${wins.length+1} of ${nw}`:" draw"}</button>
+                <button class="btn mini" data-drawwin="${p.id}">Quick draw</button>
               </div>`}
-        </div>`).join("")}
+        </div>`;}).join("")}
     <p class="muted small" style="margin:4px 0 8px">Live wheel: everyone with the site open sees the same 10-second spin on their phone, then the winner. Quick draw records instantly with no show.</p>`;
 
   const paymentsSection = `
@@ -900,13 +947,14 @@ function renderAdminPanel(force){
 
     <h2>The bag</h2>
     <div class="card" id="bag-builder">
-      <p class="muted small" style="margin-bottom:10px">One row per denomination. You can add chips mid-game; you can't cut a denomination below what's already been drawn.</p>
+      <p class="muted small" style="margin-bottom:10px">One row per denomination. You can add chips mid-game; you can't cut a denomination below what's already been drawn. <b>Perk</b> is optional (e.g. Mulligan, String extension) — if set, players see it when they pull that chip.</p>
       ${groups.map((x,i)=>{
         const d = drawnCount(x.value);
         return `<div class="bb-row" data-i="${i}">
           <input type="number" class="bb-val num" min="1" step="1" value="${x.value}" placeholder="$" ${d? "disabled":""}>
           <span class="muted">×</span>
           <input type="number" class="bb-count num" min="${d}" step="1" value="${x.total}" placeholder="#">
+          <input class="bb-perk" value="${esc(x.perk||"")}" placeholder="perk (optional)" style="max-width:150px">
           <span class="muted small num">${d} drawn</span>
           <button class="btn mini danger bb-del" ${d? "disabled":""}>✕</button>
         </div>`;}).join("")}
@@ -917,23 +965,45 @@ function renderAdminPanel(force){
     </div>
 
     <h2>Prizes (${ps.length}/30)</h2>
-    ${ps.map(p=>`<div class="card">
+    ${ps.map(p=>{
+      const wins = effWinners(p);
+      return `<div class="card">
       <div class="row spread"><b>${esc(p.name)}</b>
         <span class="muted small num">${bucketCount(p.id)} chips</span></div>
-      ${p.winnerChipId ? `<p class="small" style="color:var(--orange-deep);font-weight:700;margin-top:6px">🏆 ${esc(p.winnerName||"?")}</p>` : ""}
-      ${state!=="complete" && !p.winnerChipId ? `<button class="btn mini danger" style="margin-top:8px" data-delprize="${p.id}">Remove prize</button>` : ""}
-    </div>`).join("")}
+      <div class="row gap" style="margin-top:8px;flex-wrap:wrap">
+        <label style="margin:0;max-width:120px" class="small">Winners
+          <input type="number" class="pz-nw num" data-p="${p.id}" min="${Math.max(1,wins.length)}" max="30" value="${numW(p)}"></label>
+        <label style="margin:0;font-weight:600" class="small"><input type="checkbox" class="pz-unique" data-p="${p.id}" ${p.uniqueWinners?"checked":""} style="width:auto;margin-right:6px">No repeats</label>
+        <button class="btn mini" data-pzsave="${p.id}">Save</button>
+      </div>
+      ${wins.length ? `<p class="small" style="color:var(--orange-deep);font-weight:700;margin-top:6px">${wins.map((w,i)=>`🏆 ${esc(w.name||"?")}${numW(p)>1?` <span class="muted">(#${i+1})</span>`:""}`).join("<br>")}</p>` : ""}
+      ${state!=="complete" && !wins.length ? `<button class="btn mini danger" style="margin-top:8px" data-delprize="${p.id}">Remove prize</button>` : ""}
+    </div>`;}).join("")}
     ${ps.length < 30 ? `
     <div class="card">
       <h3>Add a prize</h3>
       <label>Name<input id="np-name" maxlength="60"></label>
       <label>Description<textarea id="np-desc" rows="2" maxlength="240"></textarea></label>
       <label>Image (optional)<input id="np-img" type="file" accept="image/*"></label>
+      <div class="row gap" style="margin-top:0">
+        <label style="margin:0;max-width:170px">Number of winners
+          <input id="np-nw" type="number" min="1" max="30" value="1"></label>
+        <label style="margin:0;font-weight:600"><input id="np-unique" type="checkbox" style="width:auto;margin-right:6px">No repeat winners</label>
+      </div>
+      <p class="muted small" style="margin:6px 0 10px">More than 1 winner = one bucket, multiple drawings (e.g. "Raffle prizes", drawn 3×). "No repeat winners" means once someone wins this prize, their other chips are skipped on redraws.</p>
       <button class="btn block" data-act="addprize">Add prize</button>
     </div>` : ""}
 
     ${drawingSection}
     ${paymentsSection}
+
+    <h2>Share the game</h2>
+    <div class="card center">
+      <img src="qr.png" alt="QR code" style="width:190px;max-width:60vw" onerror="this.closest('div').querySelector('.qrmiss').classList.remove('hidden');this.remove()">
+      <p class="muted small qrmiss hidden">Upload qr.png to the repo to show the code here.</p>
+      <p class="small" style="margin-top:8px;word-break:break-all">https://roberthlawrence.github.io/Fourth-and-Cold-Chips/</p>
+      <p class="muted small">Print the QR (it's in the repo as qr.png / qr-print.png) — players scan it, enter their email, and they're in.</p>
+    </div>
 
     <h2>Admins</h2>
     <div class="card">
@@ -998,6 +1068,17 @@ function wireAdmin(el){
     }
   }));
   el.querySelectorAll("[data-delprize]").forEach(b => b.addEventListener("click", () => removePrize(b.dataset.delprize)));
+  el.querySelectorAll("[data-pzsave]").forEach(b => b.addEventListener("click", async () => {
+    const pid = b.dataset.pzsave;
+    const nw = Math.max(1, Math.min(30, Number(el.querySelector(`.pz-nw[data-p="${pid}"]`)?.value) || 1));
+    const uq = !!el.querySelector(`.pz-unique[data-p="${pid}"]`)?.checked;
+    try{
+      await updateDoc(doc(db,"prizes",pid), { numWinners: nw, uniqueWinners: uq });
+      audit("prize", `${S.prizes[pid]?.name}: winners=${nw}, noRepeats=${uq}`);
+      toast("Prize updated");
+      S.adminDirty = false; renderAdminPanel(true);
+    }catch(e){ toast(e.code || e.message); }
+  }));
   el.querySelectorAll("[data-rmadmin]").forEach(b => b.addEventListener("click", async () => {
     const [tier, email] = b.dataset.rmadmin.split("|");
     try{
@@ -1037,6 +1118,7 @@ function wireAdmin(el){
     row.innerHTML = `<input type="number" class="bb-val num" min="1" step="1" placeholder="$">
       <span class="muted">×</span>
       <input type="number" class="bb-count num" min="0" step="1" placeholder="#">
+      <input class="bb-perk" placeholder="perk (optional)" style="max-width:150px">
       <span class="muted small num">0 drawn</span>
       <button class="btn mini danger bb-del">✕</button>`;
     holder.insertBefore(row, $("#bb-add"));
@@ -1074,7 +1156,8 @@ async function adminAct(act){
       seen.add(value);
       const drawn = drawnCount(value);
       if (total < drawn){ toast(`$${value}: can't set below ${drawn} already drawn.`); return; }
-      groups.push({ value, total, remaining: total - drawn });
+      groups.push({ value, total, remaining: total - drawn,
+        perk: (r.querySelector(".bb-perk")?.value || "").trim() });
     }
     for (const v of new Set(chipsArr().map(c=>c.value))){
       if (!seen.has(v)){ toast(`$${v} chips have been drawn — that row can't be removed.`); return; }
@@ -1253,15 +1336,23 @@ async function removePrize(pid){
   }catch(e){ toast(e.code || e.message); }
 }
 async function drawWinner(pid, quiet){
-  const p = S.prizes[pid]; if (!p || p.winnerChipId) return;
-  const entries = bucketEntries(pid);
-  if (!entries.length){ if(!quiet) toast("No chips in that bucket."); return; }
+  const p = S.prizes[pid]; if (!p || prizeDone(p)) return;
+  const entries = eligibleEntries(pid, p);
+  if (!entries.length){
+    if(!quiet) toast(p.uniqueWinners && bucketCount(pid)
+      ? "No eligible chips left — everyone remaining already won this prize."
+      : "No chips in that bucket.");
+    return;
+  }
   const win = entries[cryptoRandInt(entries.length)];
+  const winners = [...effWinners(p), { chipId: win.id, owner: win.owner,
+    name: win.ownerName, email: win.ownerEmail, value: win.value, at: Date.now() }];
   await updateDoc(doc(db,"prizes",pid), {
+    winners,
     winnerChipId: win.id, winnerName: win.ownerName,
     winnerEmail: win.ownerEmail, winnerValue: win.value, drawnAt: serverTimestamp()
   });
-  audit("winner", `${p.name} → ${win.ownerName} ($${win.value} chip, ${entries.length} entries, quick draw)`);
+  audit("winner", `${p.name} → ${win.ownerName} (winner ${winners.length}/${numW(p)}, ${entries.length} eligible, quick draw)`);
   if (!quiet) toast(`🏆 ${win.ownerName} wins ${p.name}!`);
 }
 
