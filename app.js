@@ -14,6 +14,9 @@ import {
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import * as CFG from "./firebase-config.js";
 
+const BUILD = "2026.08.05-a";
+console.log("[chip-draw] build " + BUILD);
+
 const app  = initializeApp(CFG.firebaseConfig);
 const auth = getAuth(app);
 const db   = getFirestore(app);
@@ -903,7 +906,8 @@ function renderAdminPanel(force){
     <p class="muted small" style="margin:8px 0 4px">Signed in as ${esc(S.email)}
       (${S.isPower ? "power admin" : "payment admin"}) ·
       <button class="btn mini ghost" data-act="signout">Sign out</button></p>
-    <p class="muted small" style="margin:0 0 30px">If you're playing too, draw your chips while signed in with Google so they stay tied to this account.</p>`;
+    <p class="muted small" style="margin:0 0 30px">If you're playing too, draw your chips while signed in with Google so they stay tied to this account.<br>
+      <span style="opacity:.7">Build ${BUILD}</span></p>`;
 
   if (!S.isPower){
     // payment admins: drawings + payments only
